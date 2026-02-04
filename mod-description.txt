@@ -1,0 +1,31 @@
+What can I use this for?
+ ✦ Quickly change what any NPC is wearing without opening menus or breaking immersion
+ ✦ Browse armor from all your installed mods and try them on NPCs
+ ✦ Lock outfits so NPCs keep wearing what you gave them, even when they change locations
+
+How it Works
+
+Grab any NPC with your VR controller and press trigger to open the Dress Up menu. A 3D wheel appears showing everything they are wearing. Press trigger on any item to remove it. Release trigger to anchor the menu in place while you browse.
+
+Toggle to your own inventory to give items to the NPC. Toggle to the Gallery to browse armor from all your installed mods organized by plugin.
+
+Core Features
+  ✦ Intuitive 3D menu for browsing and equipping armor and weapons
+  ✦ Browse your own inventory and transfer items to NPCs
+  ✦ Gallery mode lets you browse armor from every mod you have installed
+  ✦ Lock outfits so NPCs maintain their look across location changes and saves
+  ✦ Quick undress button with partial and full options
+  ✦ Restore original outfit at any time
+
+Requirements
+HIGGS
+VR Address Library
+Skyrim VR Tools
+
+Compatibility
+Should be compatible with most mods. Works with any armor or weapon mod.
+Since this is an SKSE mod, it is entirely safe to uninstall at any point.
+
+Limitations
+ ✦ Only works on humanoid NPCs. Children, creatures and dead NPCs are protected
+ ✦ Gallery cache builds in the background on first use. A loading indicator shows while it works

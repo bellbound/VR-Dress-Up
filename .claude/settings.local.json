@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake:*)",
+      "Bash(powershell -ExecutionPolicy Bypass -File build-dressup.ps1)",
+      "Bash(powershell:*)",
+      "Bash(powershell -ExecutionPolicy Bypass -File:*)",
+      "Bash(dir \"C:\\\\games\\\\skyrim\\\\papyrus\\\\reference\\\\SpellWheelVR 1.5.5 Source\" /b)"
+    ]
+  },
+  "outputStyle": "Explanatory"
+}

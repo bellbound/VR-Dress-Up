@@ -1,0 +1,41 @@
+# Build directories
+build/
+cmake-build*/
+out/
+
+# IDE
+.idea/
+.vs/
+.vscode/
+
+# Compiled binaries and libraries
+*.exe
+*.dll
+*.lib
+*.a
+*.so
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+
+# vcpkg
+vcpkg_installed/
+
+# CMake generated
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+*.vcxproj.user
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large texture files (exceed GitHub 100MB limit)
+assets/icons/dds/backdrop-light*.dds
+assets/icons/dds/backdrop-sm.dds
+assets/icons/pngs/backdrop-light.png
+assets/icons/pngs/backdrop-sm.png

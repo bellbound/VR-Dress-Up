@@ -1,0 +1,25 @@
+set(headers ${headers}
+	src/PCH.h
+    src/log.h
+    src/util.h
+    src/settings.h
+    src/InputManager.h
+    src/InputDispatcher.h
+    src/MenuChecker.h
+    src/higgsinterface001.h
+    src/DoubleTapDetector.h
+    src/DressupMenuManager.h
+    src/InventoryManager.h
+    src/NpcUtils.h
+    src/SpellWheelInterface.h
+    src/api/ThreeDUIInterface001.h
+    src/dressup/DressupTransaction.h
+    src/dressup/ItemEquipHelper.h
+    src/dressup/OutfitLockManager.h
+    src/util/VRNodes.h
+    external/VRManagerAPI.h
+    external/PapyrusVRTypes.h
+    external/VRHookAPI.h
+    external/PapyrusVRAPI.h
+    external/OpenVRTypes.h
+)
