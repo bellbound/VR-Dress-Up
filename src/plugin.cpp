@@ -28,9 +28,36 @@ namespace SerializationCallbacks
 
     void OnGameLoad(SKSE::SerializationInterface* a_intfc)
     {
-        OutfitLockManager::OnGameLoad(a_intfc);
-        UndressManager::OnGameLoad(a_intfc);
-        GalleryStateManager::OnGameLoad(a_intfc);
+        // Clear all managers before processing records
+        OutfitLockManager::OnPreLoad();
+        UndressManager::OnPreLoad();
+        GalleryStateManager::OnPreLoad();
+
+        // Central dispatch loop — each record goes to the correct manager
+        std::uint32_t type, version, length;
+        while (a_intfc->GetNextRecordInfo(type, version, length)) {
+            switch (type) {
+            case OutfitLockManager::kOutfitRecord:
+            case OutfitLockManager::kPlayerItemsRecord:
+                OutfitLockManager::OnLoadRecord(a_intfc, type, version, length);
+                break;
+            case UndressManager::kUndressRecord:
+                UndressManager::OnLoadRecord(a_intfc, type, version, length);
+                break;
+            case GalleryStateManager::kRecord:
+                GalleryStateManager::OnLoadRecord(a_intfc, type, version, length);
+                break;
+            default:
+                if (length > 0) {
+                    std::vector<char> skipBuffer(length);
+                    a_intfc->ReadRecordData(skipBuffer.data(), length);
+                }
+                spdlog::warn("OnGameLoad - Unknown record type: {:08X}, skipped {} bytes", type, length);
+                break;
+            }
+        }
+
+        spdlog::info("OnGameLoad - Done loading all records");
     }
 
     void OnRevert(SKSE::SerializationInterface* a_intfc)

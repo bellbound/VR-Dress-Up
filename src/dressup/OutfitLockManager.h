@@ -185,8 +185,15 @@ public:
     // Called by SKSE on game save
     static void OnGameSave(SKSE::SerializationInterface* a_intfc);
 
-    // Called by SKSE on game load
+    // Called by SKSE on game load (standalone — includes its own while loop)
     static void OnGameLoad(SKSE::SerializationInterface* a_intfc);
+
+    // Clear state before loading records (called once by central dispatch)
+    static void OnPreLoad();
+
+    // Process a single serialization record (called by central dispatch loop)
+    static void OnLoadRecord(SKSE::SerializationInterface* a_intfc,
+        std::uint32_t type, std::uint32_t version, std::uint32_t length);
 
     // Called by SKSE on game revert (new game or load)
     static void OnRevert(SKSE::SerializationInterface* a_intfc);

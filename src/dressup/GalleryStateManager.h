@@ -93,50 +93,68 @@ public:
         spdlog::info("GalleryStateManager: Saved {} front mods", count);
     }
 
-    static void OnGameLoad(SKSE::SerializationInterface* a_intfc)
+    // Clear state before loading records (called once by central dispatch)
+    static void OnPreLoad()
     {
         auto* mgr = GetSingleton();
         std::lock_guard<std::mutex> lock(mgr->m_mutex);
+        mgr->m_frontMods.clear();
+        spdlog::info("GalleryStateManager: Cleared for load");
+    }
 
-        std::uint32_t type, version, length;
-        while (a_intfc->GetNextRecordInfo(type, version, length)) {
-            if (type != kRecord) {
-                continue;
+    // Process a single serialization record (called by central dispatch loop)
+    static void OnLoadRecord(SKSE::SerializationInterface* a_intfc,
+        std::uint32_t type, std::uint32_t version, std::uint32_t length)
+    {
+        if (type != kRecord) return;
+
+        auto* mgr = GetSingleton();
+        std::lock_guard<std::mutex> lock(mgr->m_mutex);
+
+        if (version != kSerializationVersion) {
+            spdlog::warn("GalleryStateManager: Skipping record with version {} (expected {})",
+                version, kSerializationVersion);
+            if (length > 0) {
+                std::vector<char> skipBuffer(length);
+                a_intfc->ReadRecordData(skipBuffer.data(), length);
             }
+            return;
+        }
 
-            if (version != kSerializationVersion) {
-                spdlog::warn("GalleryStateManager: Skipping record with version {} (expected {})",
-                    version, kSerializationVersion);
-                continue;
-            }
+        // Read count
+        uint32_t count = 0;
+        if (!a_intfc->ReadRecordData(&count, sizeof(count))) {
+            spdlog::error("GalleryStateManager: Failed to read count");
+            return;
+        }
 
-            mgr->m_frontMods.clear();
-
-            // Read count
-            uint32_t count = 0;
-            if (!a_intfc->ReadRecordData(&count, sizeof(count))) {
-                spdlog::error("GalleryStateManager: Failed to read count");
+        // Read each mod name
+        for (uint32_t i = 0; i < count; ++i) {
+            uint32_t len = 0;
+            if (!a_intfc->ReadRecordData(&len, sizeof(len))) {
+                spdlog::error("GalleryStateManager: Failed to read string length at index {}", i);
                 return;
             }
 
-            // Read each mod name
-            for (uint32_t i = 0; i < count; ++i) {
-                uint32_t len = 0;
-                if (!a_intfc->ReadRecordData(&len, sizeof(len))) {
-                    spdlog::error("GalleryStateManager: Failed to read string length at index {}", i);
-                    return;
-                }
-
-                std::string modName(len, '\0');
-                if (!a_intfc->ReadRecordData(modName.data(), len)) {
-                    spdlog::error("GalleryStateManager: Failed to read string data at index {}", i);
-                    return;
-                }
-
-                mgr->m_frontMods.push_back(modName);
+            std::string modName(len, '\0');
+            if (!a_intfc->ReadRecordData(modName.data(), len)) {
+                spdlog::error("GalleryStateManager: Failed to read string data at index {}", i);
+                return;
             }
 
-            spdlog::info("GalleryStateManager: Loaded {} front mods", count);
+            mgr->m_frontMods.push_back(modName);
+        }
+
+        spdlog::info("GalleryStateManager: Loaded {} front mods", count);
+    }
+
+    static void OnGameLoad(SKSE::SerializationInterface* a_intfc)
+    {
+        OnPreLoad();
+
+        std::uint32_t type, version, length;
+        while (a_intfc->GetNextRecordInfo(type, version, length)) {
+            OnLoadRecord(a_intfc, type, version, length);
         }
     }
 

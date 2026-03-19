@@ -245,60 +245,66 @@ public:
         spdlog::info("UndressManager::OnGameSave - Done");
     }
 
-    static void OnGameLoad(SKSE::SerializationInterface* a_intfc)
+    // Clear state before loading records (called once by central dispatch)
+    static void OnPreLoad()
     {
         auto* mgr = GetSingleton();
         std::lock_guard<std::mutex> lock(mgr->m_mutex);
-
         mgr->m_undressStates.clear();
+        spdlog::info("UndressManager::OnPreLoad - Cleared state");
+    }
 
-        spdlog::info("UndressManager::OnGameLoad - Loading data");
+    // Process a single serialization record (called by central dispatch loop)
+    static void OnLoadRecord(SKSE::SerializationInterface* a_intfc,
+        std::uint32_t type, std::uint32_t version, std::uint32_t length)
+    {
+        if (type != kUndressRecord) return;
 
-        std::uint32_t type, version, length;
-        while (a_intfc->GetNextRecordInfo(type, version, length)) {
-            if (type != kUndressRecord) {
-                // Skip unknown records
-                if (length > 0) {
-                    std::vector<char> skipBuffer(length);
-                    a_intfc->ReadRecordData(skipBuffer.data(), length);
-                }
-                continue;
+        auto* mgr = GetSingleton();
+        std::lock_guard<std::mutex> lock(mgr->m_mutex);
+
+        if (version != kSerializationVersion) {
+            spdlog::warn("UndressManager::OnLoadRecord - Version mismatch: {} vs {}", version, kSerializationVersion);
+            if (length > 0) {
+                std::vector<char> skipBuffer(length);
+                a_intfc->ReadRecordData(skipBuffer.data(), length);
             }
+            return;
+        }
 
-            if (version != kSerializationVersion) {
-                spdlog::warn("UndressManager::OnGameLoad - Version mismatch: {} vs {}", version, kSerializationVersion);
-                // Skip this record
-                if (length > 0) {
-                    std::vector<char> skipBuffer(length);
-                    a_intfc->ReadRecordData(skipBuffer.data(), length);
-                }
-                continue;
-            }
+        // Read count
+        std::uint32_t count = 0;
+        a_intfc->ReadRecordData(&count, sizeof(count));
 
-            // Read count
-            std::uint32_t count = 0;
-            a_intfc->ReadRecordData(&count, sizeof(count));
+        // Read each entry
+        for (std::uint32_t i = 0; i < count; ++i) {
+            RE::FormID oldActorID = 0;
+            UndressState state = UndressState::Dressed;
 
-            // Read each entry
-            for (std::uint32_t i = 0; i < count; ++i) {
-                RE::FormID oldActorID = 0;
-                UndressState state = UndressState::Dressed;
+            a_intfc->ReadRecordData(&oldActorID, sizeof(oldActorID));
+            a_intfc->ReadRecordData(&state, sizeof(state));
 
-                a_intfc->ReadRecordData(&oldActorID, sizeof(oldActorID));
-                a_intfc->ReadRecordData(&state, sizeof(state));
-
-                // Resolve FormID for load order changes
-                RE::FormID newActorID = 0;
-                if (a_intfc->ResolveFormID(oldActorID, newActorID)) {
-                    mgr->m_undressStates[newActorID] = state;
-                    spdlog::trace("  - Loaded state {} for actor 0x{:08X}", static_cast<int>(state), newActorID);
-                } else {
-                    spdlog::warn("  - Could not resolve actor 0x{:08X}", oldActorID);
-                }
+            // Resolve FormID for load order changes
+            RE::FormID newActorID = 0;
+            if (a_intfc->ResolveFormID(oldActorID, newActorID)) {
+                mgr->m_undressStates[newActorID] = state;
+                spdlog::trace("  - Loaded state {} for actor 0x{:08X}", static_cast<int>(state), newActorID);
+            } else {
+                spdlog::warn("  - Could not resolve actor 0x{:08X}", oldActorID);
             }
         }
 
-        spdlog::info("UndressManager::OnGameLoad - Loaded {} undress states", mgr->m_undressStates.size());
+        spdlog::info("UndressManager::OnLoadRecord - Loaded {} undress states", mgr->m_undressStates.size());
+    }
+
+    static void OnGameLoad(SKSE::SerializationInterface* a_intfc)
+    {
+        OnPreLoad();
+
+        std::uint32_t type, version, length;
+        while (a_intfc->GetNextRecordInfo(type, version, length)) {
+            OnLoadRecord(a_intfc, type, version, length);
+        }
     }
 
     static void OnRevert(SKSE::SerializationInterface*)

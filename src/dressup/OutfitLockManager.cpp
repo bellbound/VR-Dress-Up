@@ -964,7 +964,7 @@ void OutfitLockManager::OnGameSave(SKSE::SerializationInterface* a_intfc)
     spdlog::info("OutfitLockManager::OnGameSave - Done");
 }
 
-void OutfitLockManager::OnGameLoad(SKSE::SerializationInterface* a_intfc)
+void OutfitLockManager::OnPreLoad()
 {
     auto* mgr = GetSingleton();
     std::lock_guard<std::mutex> lock(mgr->m_mutex);
@@ -972,31 +972,25 @@ void OutfitLockManager::OnGameLoad(SKSE::SerializationInterface* a_intfc)
     mgr->m_outfits.clear();
     mgr->m_playerGivenItems.clear();
 
-    spdlog::info("OutfitLockManager::OnGameLoad - Loading data");
+    spdlog::info("OutfitLockManager::OnPreLoad - Cleared state");
+}
 
-    std::uint32_t type, version, length;
-    while (a_intfc->GetNextRecordInfo(type, version, length)) {
-        if (version > kSerializationVersion) {
-            // Skip future version record by consuming its data
-            if (length > 0) {
-                std::vector<char> skipBuffer(length);
-                a_intfc->ReadRecordData(skipBuffer.data(), length);
-            }
-            spdlog::warn("OutfitLockManager::OnGameLoad - Future version: {} vs {}, skipped {} bytes",
-                version, kSerializationVersion, length);
-            continue;
-        }
+void OutfitLockManager::OnLoadRecord(SKSE::SerializationInterface* a_intfc,
+    std::uint32_t type, std::uint32_t version, std::uint32_t length)
+{
+    auto* mgr = GetSingleton();
+    std::lock_guard<std::mutex> lock(mgr->m_mutex);
 
-        if (type == kOutfitRecord) {
+    if (type == kOutfitRecord) {
             // Support v4 (armor-only FormKeys) and v5 (armor + weapons + weaponUnlocked)
             if (version != kSerializationVersion && version != 4) {
-                spdlog::warn("OutfitLockManager::OnGameLoad - Incompatible outfit version {} (expected 4 or {}), skipping",
+                spdlog::warn("OutfitLockManager::OnLoadRecord - Incompatible outfit version {} (expected 4 or {}), skipping",
                     version, kSerializationVersion);
                 if (length > 0) {
                     std::vector<char> skipBuffer(length);
                     a_intfc->ReadRecordData(skipBuffer.data(), length);
                 }
-                continue;
+                return;
             }
 
             // Read number of outfits
@@ -1155,16 +1149,28 @@ void OutfitLockManager::OnGameLoad(SKSE::SerializationInterface* a_intfc)
                 }
             }
         }
-        else {
-            // Skip unknown record by consuming its data
-            if (length > 0) {
-                std::vector<char> skipBuffer(length);
-                a_intfc->ReadRecordData(skipBuffer.data(), length);
-            }
-            spdlog::warn("OutfitLockManager::OnGameLoad - Unknown record type: {:08X}, skipped {} bytes", type, length);
+    else {
+        // Unknown record type — skip its data
+        if (length > 0) {
+            std::vector<char> skipBuffer(length);
+            a_intfc->ReadRecordData(skipBuffer.data(), length);
         }
+        spdlog::warn("OutfitLockManager::OnLoadRecord - Unknown record type: {:08X}, skipped {} bytes", type, length);
+    }
+}
+
+void OutfitLockManager::OnGameLoad(SKSE::SerializationInterface* a_intfc)
+{
+    OnPreLoad();
+
+    spdlog::info("OutfitLockManager::OnGameLoad - Loading data");
+
+    std::uint32_t type, version, length;
+    while (a_intfc->GetNextRecordInfo(type, version, length)) {
+        OnLoadRecord(a_intfc, type, version, length);
     }
 
+    auto* mgr = GetSingleton();
     spdlog::info("OutfitLockManager::OnGameLoad - Loaded {} outfits, {} actors with player items",
         mgr->m_outfits.size(), mgr->m_playerGivenItems.size());
 }
