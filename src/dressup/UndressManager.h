@@ -74,6 +74,7 @@ public:
         if (!actor) return;
 
         auto* equipManager = RE::ActorEquipManager::GetSingleton();
+        auto* outfitMgr = OutfitLockManager::GetSingleton();
         if (!equipManager) {
             spdlog::error("UndressManager::UndressPartial - No ActorEquipManager");
             return;
@@ -81,17 +82,17 @@ public:
 
         spdlog::info("UndressManager::UndressPartial - Partially undressing '{}'", actor->GetName());
 
+        bool wasLocked = outfitMgr->IsLocked(actor);
+
         // Save original outfit first (only if not already saved)
         SavePreUndressOutfit(actor);
 
-        // Suspend lock enforcement while we make changes
-        ScopedLockSuspension suspension(actor);
-
-        // Unequip outer armor only
+        // Unequip outer armor only — update locked outfit data before each unequip
         auto armors = ItemEquipHelper::GetInventoryItems<RE::TESObjectARMO>(actor);
 
         for (auto* armor : armors) {
             if (UndressHelper::IsOuterArmor(armor) && ItemEquipHelper::IsArmorEquipped(actor, armor)) {
+                outfitMgr->RemoveFromLockedOutfit(actor, armor);
                 equipManager->UnequipObject(actor, armor, nullptr, 1, nullptr, false, true);
                 spdlog::trace("  - Unequipped outer armor: '{}'", armor->GetFullName());
             }
@@ -100,10 +101,9 @@ public:
         // Update state
         SetUndressState(actor, UndressState::PartiallyUndressed);
 
-        // Lock will be re-applied when suspension goes out of scope (if was locked),
-        // or we manually lock if this is a fresh undress
-        if (!suspension.WasLocked()) {
-            OutfitLockManager::GetSingleton()->Lock(actor);
+        // Lock the NPC if this is a fresh undress (wasn't previously locked)
+        if (!wasLocked) {
+            outfitMgr->Lock(actor);
         }
 
         spdlog::info("UndressManager::UndressPartial - '{}' is now partially undressed", actor->GetName());
@@ -115,6 +115,7 @@ public:
         if (!actor) return;
 
         auto* equipManager = RE::ActorEquipManager::GetSingleton();
+        auto* outfitMgr = OutfitLockManager::GetSingleton();
         if (!equipManager) {
             spdlog::error("UndressManager::UndressFull - No ActorEquipManager");
             return;
@@ -122,17 +123,17 @@ public:
 
         spdlog::info("UndressManager::UndressFull - Fully undressing '{}'", actor->GetName());
 
+        bool wasLocked = outfitMgr->IsLocked(actor);
+
         // Save original outfit if not already saved (handles direct full undress)
         SavePreUndressOutfit(actor);
 
-        // Suspend lock enforcement while we make changes
-        ScopedLockSuspension suspension(actor);
-
-        // Unequip ALL armor
+        // Unequip ALL armor — update locked outfit data before each unequip
         auto armors = ItemEquipHelper::GetInventoryItems<RE::TESObjectARMO>(actor);
 
         for (auto* armor : armors) {
             if (ItemEquipHelper::IsArmorEquipped(actor, armor)) {
+                outfitMgr->RemoveFromLockedOutfit(actor, armor);
                 equipManager->UnequipObject(actor, armor, nullptr, 1, nullptr, false, true);
                 spdlog::trace("  - Unequipped: '{}'", armor->GetFullName());
             }
@@ -141,10 +142,9 @@ public:
         // Update state
         SetUndressState(actor, UndressState::FullyUndressed);
 
-        // Lock will be re-applied when suspension goes out of scope (if was locked),
-        // or we manually lock if this is a fresh undress
-        if (!suspension.WasLocked()) {
-            OutfitLockManager::GetSingleton()->Lock(actor);
+        // Lock the NPC if this is a fresh undress (wasn't previously locked)
+        if (!wasLocked) {
+            outfitMgr->Lock(actor);
         }
 
         spdlog::info("UndressManager::UndressFull - '{}' is now fully undressed", actor->GetName());
@@ -158,12 +158,17 @@ public:
         spdlog::info("UndressManager::Redress - Re-dressing '{}'", actor->GetName());
 
         auto* outfitMgr = OutfitLockManager::GetSingleton();
-
-        // Suspend lock enforcement while we make changes
-        ScopedLockSuspension suspension(actor);
+        bool wasLocked = outfitMgr->IsLocked(actor);
 
         // Apply saved pre-undress outfit
         if (outfitMgr->HasOutfit(actor, kPreUndressOutfitName)) {
+            // Update the locked outfit whitelist to match the target (pre-undress) state
+            // so the equip hooks allow the ApplyOutfit calls through
+            auto preundressData = outfitMgr->GetOutfitData(actor, kPreUndressOutfitName);
+            if (wasLocked && preundressData) {
+                outfitMgr->SetLockedOutfitData(actor, *preundressData);
+            }
+
             outfitMgr->ApplyOutfit(actor, kPreUndressOutfitName, true);  // unequipOthers=true
             outfitMgr->DeleteOutfit(actor, kPreUndressOutfitName);
             spdlog::info("  - Restored pre-undress outfit");
@@ -174,7 +179,6 @@ public:
         // Clear undress state (NPC is now "dressed" in whatever they have)
         ClearUndressState(actor);
 
-        // Lock will be re-applied when suspension goes out of scope (if was locked)
         spdlog::info("UndressManager::Redress - '{}' is now dressed", actor->GetName());
     }
 

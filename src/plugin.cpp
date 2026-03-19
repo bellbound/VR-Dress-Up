@@ -7,6 +7,7 @@
 #include "MenuChecker.h"
 #include "dressup/OutfitLockManager.h"
 #include "dressup/UndressManager.h"
+#include "dressup/EquipHooks.h"
 #include "dressup/GalleryStateManager.h"
 #include "dressup/ArmorModManager.h"
 #include "InventoryManager.h"
@@ -62,7 +63,10 @@ void MessageHandler(SKSE::MessagingInterface::Message* a_msg)
 		break;
 
 	case SKSE::MessagingInterface::kDataLoaded:
-		spdlog::info("DataLoaded - Initializing managers");
+		spdlog::info("DataLoaded - Installing hooks and initializing managers");
+
+		// Install equip/unequip hooks to enforce outfit locks
+		EquipHooks::Install();
 
 		// Register menu event handler for input blocking during menus
 		MenuChecker::RegisterEventSink();

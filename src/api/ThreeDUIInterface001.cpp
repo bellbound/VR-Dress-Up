@@ -38,9 +38,8 @@ Interface001* GetInterface001() {
     g_p3duiInterface = static_cast<Interface001*>(getInterface(1));
 
     if (g_p3duiInterface) {
-        spdlog::info("P3DUI::GetInterface001: Obtained interface (version {}, build {})",
-            g_p3duiInterface->GetInterfaceVersion(),
-            g_p3duiInterface->GetBuildNumber());
+        spdlog::info("P3DUI::GetInterface001: Obtained interface (version {})",
+            g_p3duiInterface->GetInterfaceVersion());
     } else {
         spdlog::error("P3DUI::GetInterface001: GetP3DUIInterface returned nullptr");
     }

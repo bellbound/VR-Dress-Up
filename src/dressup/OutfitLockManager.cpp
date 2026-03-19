@@ -259,15 +259,52 @@ bool OutfitLockManager::SaveOutfit(RE::Actor* actor, const std::string& outfitNa
             armor->GetFullName(), formKey);
     }
 
-    OutfitKey key{actor->GetFormID(), outfitName};
+    // Also capture equipped weapons
+    RE::TESForm* rightHand = actor->GetEquippedObject(false);
+    RE::TESForm* leftHand = actor->GetEquippedObject(true);
 
+    auto addWeapon = [&outfit](RE::TESForm* form) {
+        if (!form) return;
+        auto* weapon = form->As<RE::TESObjectWEAP>();
+        if (!weapon) return;
+
+        std::string wFormKey = Persistence::FormKeyUtil::BuildFormKey(weapon);
+        if (wFormKey.empty()) {
+            spdlog::warn("  - Skipping weapon '{}' - no source file (dynamic item?)", weapon->GetFullName());
+            return;
+        }
+
+        // Avoid duplicates (dual-wielding same weapon)
+        for (const auto& existing : outfit.weapons) {
+            if (existing.formKey == wFormKey) return;
+        }
+
+        SavedArmorItem item;
+        item.formKey = wFormKey;
+        outfit.weapons.push_back(item);
+        spdlog::info("  - Saved weapon '{}' as '{}'", weapon->GetFullName(), wFormKey);
+    };
+
+    addWeapon(rightHand);
+    addWeapon(leftHand);
+
+    size_t weaponCount = outfit.weapons.size();
+
+    // Preserve weaponUnlocked from existing locked outfit if re-saving
+    OutfitKey key{actor->GetFormID(), outfitName};
     {
         std::lock_guard<std::mutex> lock(m_mutex);
+        if (outfitName == "locked") {
+            auto existingIt = m_outfits.find(key);
+            if (existingIt != m_outfits.end()) {
+                outfit.weaponUnlocked = existingIt->second.weaponUnlocked;
+            }
+        }
         m_outfits[key] = std::move(outfit);
     }
 
-    spdlog::info("OutfitLockManager::SaveOutfit - Saved {} items for outfit '{}'",
-        equipped.size(), outfitName);
+    spdlog::info("OutfitLockManager::SaveOutfit - Saved {} armor, {} weapons for outfit '{}'",
+        equipped.size(), weaponCount, outfitName);
 
     return true;
 }
@@ -352,8 +389,53 @@ bool OutfitLockManager::ApplyOutfit(RE::Actor* actor, const std::string& outfitN
     // Equip valid armor
     EquipArmorList(actor, validArmor);
 
-    spdlog::info("OutfitLockManager::ApplyOutfit - Applied {} items from outfit '{}'",
-        validArmor.size(), outfitName);
+    // Equip weapons if weapon lock is active
+    if (!outfit.weaponUnlocked) {
+        auto* equipManager = RE::ActorEquipManager::GetSingleton();
+        if (equipManager) {
+            // Collect valid weapons
+            std::vector<std::string> weaponKeysToRemove;
+            for (const auto& wItem : outfit.weapons) {
+                auto* weapon = wItem.GetWeapon();
+                if (!weapon) {
+                    weaponKeysToRemove.push_back(wItem.formKey);
+                    spdlog::warn("  - Weapon '{}' is no longer valid, removing", wItem.formKey);
+                    continue;
+                }
+
+                // Check if NPC has weapon in inventory
+                auto inventory = actor->GetInventory([weapon](RE::TESBoundObject& obj) {
+                    return obj.GetFormID() == weapon->GetFormID();
+                });
+
+                if (inventory.empty()) {
+                    weaponKeysToRemove.push_back(wItem.formKey);
+                    spdlog::warn("  - NPC doesn't have weapon '{}' in inventory, removing", weapon->GetFullName());
+                    continue;
+                }
+
+                equipManager->EquipObject(actor, weapon, nullptr, 1, nullptr, true, false, false);
+                spdlog::info("  - Equipped weapon '{}'", weapon->GetFullName());
+            }
+
+            // Remove invalid weapons from stored outfit
+            if (!weaponKeysToRemove.empty()) {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                auto it = m_outfits.find(key);
+                if (it != m_outfits.end()) {
+                    it->second.weapons.erase(
+                        std::remove_if(it->second.weapons.begin(), it->second.weapons.end(),
+                            [&weaponKeysToRemove](const SavedArmorItem& item) {
+                                return std::find(weaponKeysToRemove.begin(), weaponKeysToRemove.end(), item.formKey) != weaponKeysToRemove.end();
+                            }),
+                        it->second.weapons.end());
+                }
+            }
+        }
+    }
+
+    spdlog::info("OutfitLockManager::ApplyOutfit - Applied {} armor, {} weapons from outfit '{}'",
+        validArmor.size(), outfit.weapons.size(), outfitName);
 
     return true;
 }
@@ -423,6 +505,182 @@ bool OutfitLockManager::Unlock(RE::Actor* actor)
 bool OutfitLockManager::IsLocked(RE::Actor* actor) const
 {
     return HasOutfit(actor, "locked");
+}
+
+void OutfitLockManager::AddToLockedOutfit(RE::Actor* actor, RE::TESBoundObject* item)
+{
+    if (!actor || !item) return;
+    if (!IsLocked(actor)) return;
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    OutfitKey key{actor->GetFormID(), "locked"};
+    auto it = m_outfits.find(key);
+    if (it == m_outfits.end()) return;
+
+    std::string formKey = Persistence::FormKeyUtil::BuildFormKey(item);
+    if (formKey.empty()) {
+        spdlog::warn("OutfitLockManager::AddToLockedOutfit - Cannot build FormKey for '{}'", item->GetName());
+        return;
+    }
+
+    if (item->Is(RE::FormType::Armor)) {
+        auto* armor = item->As<RE::TESObjectARMO>();
+        if (!armor) return;
+
+        // Remove any existing item in the same slot to avoid conflicts
+        auto slotMask = armor->GetSlotMask();
+        using SlotType = std::underlying_type_t<RE::BIPED_MODEL::BipedObjectSlot>;
+        it->second.items.erase(
+            std::remove_if(it->second.items.begin(), it->second.items.end(),
+                [slotMask](const SavedArmorItem& existing) {
+                    auto* existingArmor = existing.GetArmor();
+                    return existingArmor &&
+                        (static_cast<SlotType>(existingArmor->GetSlotMask()) & static_cast<SlotType>(slotMask)) != 0;
+                }),
+            it->second.items.end());
+
+        SavedArmorItem newItem;
+        newItem.formKey = formKey;
+        it->second.items.push_back(newItem);
+
+        spdlog::info("OutfitLockManager::AddToLockedOutfit - Added armor '{}' to locked outfit for '{}'",
+            item->GetName(), actor->GetName());
+    }
+    else if (item->Is(RE::FormType::Weapon)) {
+        // Check if already in weapon list
+        for (const auto& w : it->second.weapons) {
+            if (w.GetRuntimeFormID() == item->GetFormID()) {
+                return;  // already in list
+            }
+        }
+
+        SavedArmorItem newItem;
+        newItem.formKey = formKey;
+        it->second.weapons.push_back(newItem);
+        it->second.weaponUnlocked = false;  // explicit weapon change locks weapons
+
+        spdlog::info("OutfitLockManager::AddToLockedOutfit - Added weapon '{}' to locked outfit for '{}'",
+            item->GetName(), actor->GetName());
+    }
+}
+
+void OutfitLockManager::RemoveFromLockedOutfit(RE::Actor* actor, RE::TESBoundObject* item)
+{
+    if (!actor || !item) return;
+    if (!IsLocked(actor)) return;
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    OutfitKey key{actor->GetFormID(), "locked"};
+    auto it = m_outfits.find(key);
+    if (it == m_outfits.end()) return;
+
+    RE::FormID targetID = item->GetFormID();
+
+    if (item->Is(RE::FormType::Armor)) {
+        it->second.items.erase(
+            std::remove_if(it->second.items.begin(), it->second.items.end(),
+                [targetID](const SavedArmorItem& existing) {
+                    return existing.GetRuntimeFormID() == targetID;
+                }),
+            it->second.items.end());
+
+        spdlog::info("OutfitLockManager::RemoveFromLockedOutfit - Removed armor '{}' from locked outfit for '{}'",
+            item->GetName(), actor->GetName());
+    }
+    else if (item->Is(RE::FormType::Weapon)) {
+        it->second.weapons.erase(
+            std::remove_if(it->second.weapons.begin(), it->second.weapons.end(),
+                [targetID](const SavedArmorItem& existing) {
+                    return existing.GetRuntimeFormID() == targetID;
+                }),
+            it->second.weapons.end());
+
+        spdlog::info("OutfitLockManager::RemoveFromLockedOutfit - Removed weapon '{}' from locked outfit for '{}'",
+            item->GetName(), actor->GetName());
+    }
+}
+
+void OutfitLockManager::SetLockedOutfitData(RE::Actor* actor, const SavedOutfit& outfit)
+{
+    if (!actor) return;
+
+    OutfitKey key{actor->GetFormID(), "locked"};
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_outfits[key] = outfit;
+
+    spdlog::info("OutfitLockManager::SetLockedOutfitData - Set locked outfit for '{}' ({} armor, {} weapons, weaponUnlocked={})",
+        actor->GetName(), outfit.items.size(), outfit.weapons.size(), outfit.weaponUnlocked);
+}
+
+std::optional<SavedOutfit> OutfitLockManager::GetOutfitData(RE::Actor* actor, const std::string& outfitName) const
+{
+    if (!actor) return std::nullopt;
+
+    OutfitKey key{actor->GetFormID(), outfitName};
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_outfits.find(key);
+    if (it == m_outfits.end()) return std::nullopt;
+
+    return it->second;
+}
+
+bool OutfitLockManager::IsInLockedOutfit(RE::Actor* actor, RE::TESBoundObject* item) const
+{
+    if (!actor || !item) return false;
+
+    OutfitKey key{actor->GetFormID(), "locked"};
+    RE::FormID targetID = item->GetFormID();
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_outfits.find(key);
+    if (it == m_outfits.end()) return false;
+
+    if (item->Is(RE::FormType::Armor)) {
+        for (const auto& saved : it->second.items) {
+            if (saved.GetRuntimeFormID() == targetID) return true;
+        }
+        return false;
+    }
+
+    if (item->Is(RE::FormType::Weapon)) {
+        for (const auto& saved : it->second.weapons) {
+            if (saved.GetRuntimeFormID() == targetID) return true;
+        }
+        return false;
+    }
+
+    return false;
+}
+
+bool OutfitLockManager::IsWeaponUnlocked(RE::Actor* actor) const
+{
+    if (!actor) return true;
+
+    OutfitKey key{actor->GetFormID(), "locked"};
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_outfits.find(key);
+    if (it == m_outfits.end()) return true;
+
+    return it->second.weaponUnlocked;
+}
+
+void OutfitLockManager::SetWeaponUnlocked(RE::Actor* actor, bool unlocked)
+{
+    if (!actor) return;
+
+    OutfitKey key{actor->GetFormID(), "locked"};
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = m_outfits.find(key);
+    if (it == m_outfits.end()) return;
+
+    it->second.weaponUnlocked = unlocked;
+
+    spdlog::info("OutfitLockManager::SetWeaponUnlocked - Set weaponUnlocked={} for '{}'",
+        unlocked, actor->GetName());
 }
 
 void OutfitLockManager::MarkItemAsPlayerGiven(RE::Actor* actor, RE::FormID itemID)
@@ -652,15 +910,29 @@ void OutfitLockManager::OnGameSave(SKSE::SerializationInterface* a_intfc)
         std::uint32_t itemCount = static_cast<std::uint32_t>(outfit.items.size());
         a_intfc->WriteRecordData(&itemCount, sizeof(itemCount));
 
-        // Write each item's formKey string (length-prefixed)
+        // Write each armor item's formKey string (length-prefixed)
         for (const auto& item : outfit.items) {
             std::uint32_t keyLen = static_cast<std::uint32_t>(item.formKey.size());
             a_intfc->WriteRecordData(&keyLen, sizeof(keyLen));
             a_intfc->WriteRecordData(item.formKey.data(), keyLen);
         }
 
-        spdlog::info("  - Saved outfit '{}' for actor 0x{:08X} with {} items",
-            key.outfitName, key.actorRefID, itemCount);
+        // v5: Write weapon items
+        std::uint32_t weaponCount = static_cast<std::uint32_t>(outfit.weapons.size());
+        a_intfc->WriteRecordData(&weaponCount, sizeof(weaponCount));
+
+        for (const auto& weapon : outfit.weapons) {
+            std::uint32_t keyLen = static_cast<std::uint32_t>(weapon.formKey.size());
+            a_intfc->WriteRecordData(&keyLen, sizeof(keyLen));
+            a_intfc->WriteRecordData(weapon.formKey.data(), keyLen);
+        }
+
+        // v5: Write weaponUnlocked flag
+        std::uint8_t weaponUnlocked = outfit.weaponUnlocked ? 1 : 0;
+        a_intfc->WriteRecordData(&weaponUnlocked, sizeof(weaponUnlocked));
+
+        spdlog::info("  - Saved outfit '{}' for actor 0x{:08X} with {} armor, {} weapons (weaponUnlocked={})",
+            key.outfitName, key.actorRefID, itemCount, weaponCount, outfit.weaponUnlocked);
     }
 
     // === Save Player Given Items ===
@@ -716,11 +988,10 @@ void OutfitLockManager::OnGameLoad(SKSE::SerializationInterface* a_intfc)
         }
 
         if (type == kOutfitRecord) {
-            // v4+: FormKey strings for armor items (no backwards compatibility)
-            if (version != kSerializationVersion) {
-                spdlog::warn("OutfitLockManager::OnGameLoad - Incompatible outfit version {} (expected {}), skipping",
+            // Support v4 (armor-only FormKeys) and v5 (armor + weapons + weaponUnlocked)
+            if (version != kSerializationVersion && version != 4) {
+                spdlog::warn("OutfitLockManager::OnGameLoad - Incompatible outfit version {} (expected 4 or {}), skipping",
                     version, kSerializationVersion);
-                // Skip by consuming remaining bytes (already read type/version/length)
                 if (length > 0) {
                     std::vector<char> skipBuffer(length);
                     a_intfc->ReadRecordData(skipBuffer.data(), length);
@@ -733,7 +1004,7 @@ void OutfitLockManager::OnGameLoad(SKSE::SerializationInterface* a_intfc)
             a_intfc->ReadRecordData(&outfitCount, sizeof(outfitCount));
 
             for (std::uint32_t i = 0; i < outfitCount; ++i) {
-                // Read actor ref ID (still uses SKSE resolution for NPCs)
+                // Read actor ref ID
                 RE::FormID oldActorID = 0;
                 a_intfc->ReadRecordData(&oldActorID, sizeof(oldActorID));
 
@@ -747,7 +1018,7 @@ void OutfitLockManager::OnGameLoad(SKSE::SerializationInterface* a_intfc)
                     std::string dummyName(nameLen, '\0');
                     a_intfc->ReadRecordData(dummyName.data(), nameLen);
 
-                    // Skip items (now formKey strings)
+                    // Skip armor items
                     std::uint32_t itemCount = 0;
                     a_intfc->ReadRecordData(&itemCount, sizeof(itemCount));
                     for (std::uint32_t j = 0; j < itemCount; ++j) {
@@ -755,6 +1026,20 @@ void OutfitLockManager::OnGameLoad(SKSE::SerializationInterface* a_intfc)
                         a_intfc->ReadRecordData(&keyLen, sizeof(keyLen));
                         std::string dummyKey(keyLen, '\0');
                         a_intfc->ReadRecordData(dummyKey.data(), keyLen);
+                    }
+
+                    // v5: also skip weapon items and weaponUnlocked
+                    if (version >= 5) {
+                        std::uint32_t weaponCount = 0;
+                        a_intfc->ReadRecordData(&weaponCount, sizeof(weaponCount));
+                        for (std::uint32_t j = 0; j < weaponCount; ++j) {
+                            std::uint32_t keyLen = 0;
+                            a_intfc->ReadRecordData(&keyLen, sizeof(keyLen));
+                            std::string dummyKey(keyLen, '\0');
+                            a_intfc->ReadRecordData(dummyKey.data(), keyLen);
+                        }
+                        std::uint8_t dummyFlag = 0;
+                        a_intfc->ReadRecordData(&dummyFlag, sizeof(dummyFlag));
                     }
                     continue;
                 }
@@ -765,36 +1050,61 @@ void OutfitLockManager::OnGameLoad(SKSE::SerializationInterface* a_intfc)
                 std::string outfitName(nameLen, '\0');
                 a_intfc->ReadRecordData(outfitName.data(), nameLen);
 
-                // Read items (formKey strings)
+                // Read armor items (formKey strings)
                 std::uint32_t itemCount = 0;
                 a_intfc->ReadRecordData(&itemCount, sizeof(itemCount));
 
                 SavedOutfit outfit;
-                std::uint32_t validCount = 0;
 
                 for (std::uint32_t j = 0; j < itemCount; ++j) {
-                    // Read formKey string
                     std::uint32_t keyLen = 0;
                     a_intfc->ReadRecordData(&keyLen, sizeof(keyLen));
                     std::string formKey(keyLen, '\0');
                     a_intfc->ReadRecordData(formKey.data(), keyLen);
 
-                    // FormKey resolution happens lazily in IsValid()/GetArmor()
-                    // Just store the key - it will be validated when applied
                     SavedArmorItem item;
                     item.formKey = formKey;
                     outfit.items.push_back(item);
-                    ++validCount;
 
                     spdlog::trace("    - Loaded armor key: {}", formKey);
+                }
+
+                // v5: Read weapon items and weaponUnlocked flag
+                if (version >= 5) {
+                    std::uint32_t weaponCount = 0;
+                    a_intfc->ReadRecordData(&weaponCount, sizeof(weaponCount));
+
+                    for (std::uint32_t j = 0; j < weaponCount; ++j) {
+                        std::uint32_t keyLen = 0;
+                        a_intfc->ReadRecordData(&keyLen, sizeof(keyLen));
+                        std::string formKey(keyLen, '\0');
+                        a_intfc->ReadRecordData(formKey.data(), keyLen);
+
+                        SavedArmorItem wItem;
+                        wItem.formKey = formKey;
+                        outfit.weapons.push_back(wItem);
+
+                        spdlog::trace("    - Loaded weapon key: {}", formKey);
+                    }
+
+                    std::uint8_t weaponUnlocked = 1;
+                    a_intfc->ReadRecordData(&weaponUnlocked, sizeof(weaponUnlocked));
+                    outfit.weaponUnlocked = (weaponUnlocked != 0);
+                } else {
+                    // v4 migration: no weapon data, default to unlocked
+                    outfit.weapons.clear();
+                    outfit.weaponUnlocked = true;
+                    spdlog::info("    - v4→v5 migration: defaulting weapons unlocked");
                 }
 
                 // Store the outfit
                 OutfitKey key{newActorID, outfitName};
                 mgr->m_outfits[key] = std::move(outfit);
 
-                spdlog::info("  - Loaded outfit '{}' for actor 0x{:08X} with {} items",
-                    outfitName, newActorID, validCount);
+                spdlog::info("  - Loaded outfit '{}' for actor 0x{:08X} ({} armor, {} weapons, weaponUnlocked={})",
+                    outfitName, newActorID, itemCount,
+                    version >= 5 ? mgr->m_outfits[key].weapons.size() : 0,
+                    mgr->m_outfits[key].weaponUnlocked);
             }
         }
         else if (type == kPlayerItemsRecord) {

@@ -8,7 +8,7 @@
 //
 // Quick Start:
 //   1. Get interface after PostPostLoad: auto* api = P3DUI::GetInterface001();
-//   2. Create a root: auto* root = api->CreateRoot(RootConfig::Default("myMenu", "MyModName"));
+//   2. Create a root: auto* root = api->GetOrCreateRoot(RootConfig::Default("myMenu", "MyModName"));
 //   3. Add containers: auto* wheel = api->CreateScrollWheel(ScrollWheelConfig::Default("items"));
 //   4. Add items: auto* sword = api->CreateElement(ElementConfig::Default("sword"));
 //   5. Add to hierarchy: wheel->AddChild(sword); root->AddChild(wheel);
@@ -578,20 +578,30 @@ struct Root : Container {
 // =============================================================================
 
 // Interface version for compatibility checking
-// Consumers should verify: api->GetInterfaceVersion() == P3DUI_INTERFACE_VERSION
-constexpr uint32_t P3DUI_INTERFACE_VERSION = 1;
+// Format: Major * 1000000 + Minor * 10000 + Patch * 100 + Build
+//
+// Version Compatibility Rules:
+// - Pre-1.0.0 (version < 1000000): Major AND minor must match exactly.
+//   Example: 0.10.1.0 and 0.10.0.0 are compatible, 0.10.x and 0.9.x are NOT.
+// - Post-1.0.0 (version >= 1000000): Backwards compatible within same major.
+//   Provider minor version must be >= consumer expected minor.
+//   Only major version changes break compatibility.
+constexpr uint32_t P3DUI_INTERFACE_VERSION =
+    0 * 1000000 +
+    9 * 10000 +
+    5 * 100 +
+    0;
 
 struct Interface001 {
     // === Version ===
-    // Returns P3DUI_INTERFACE_VERSION (1 for this interface)
     virtual uint32_t GetInterfaceVersion() = 0;
-    // Returns implementation build number (increments with each release)
-    virtual uint32_t GetBuildNumber() = 0;
 
     // === Root Management ===
-    // Creates a new root container. Returns nullptr on failure.
-    // Logs error if ID is already registered.
-    virtual Root* CreateRoot(const RootConfig& config) = 0;
+    // Gets an existing root by ID, or creates it if it doesn't exist.
+    // Returns nullptr only on actual failure (missing ID/modId, or internal error).
+    // Safe to call multiple times with the same ID — returns the existing root.
+    // Config is only used on first creation; subsequent calls ignore config differences.
+    virtual Root* GetOrCreateRoot(const RootConfig& config) = 0;
     // Get an existing root by ID. Returns nullptr if not found.
     virtual Root* GetRoot(const char* id) = 0;
 
