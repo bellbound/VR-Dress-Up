@@ -269,30 +269,26 @@ public:
     {
         if (!armor || !m_targetActor) return false;
 
-        auto* outfitMgr = OutfitLockManager::GetSingleton();
-        bool wasLocked = outfitMgr->IsLocked(m_targetActor);
+        // Suspend lock enforcement while we make changes
+        ScopedLockSuspension suspension(m_targetActor);
 
         if (m_targetIsPlayer) {
+            // Check if this is a transferred item (ghost entry) - if so, reverse the transfer
             if (m_transaction.IsTransferredItem(armor->GetFormID())) {
-                outfitMgr->RemoveFromLockedOutfit(m_targetActor, armor);
                 ReverseTransfer(armor);
             } else {
                 EquipFromPlayer(armor);
             }
         } else {
-            // Toggle: update outfit data before equip/unequip
-            if (ItemEquipHelper::IsArmorEquipped(m_targetActor, armor)) {
-                outfitMgr->RemoveFromLockedOutfit(m_targetActor, armor);
-                ItemEquipHelper::UnequipItem(m_targetActor, armor);
-            } else {
-                outfitMgr->AddToLockedOutfit(m_targetActor, armor);
-                ItemEquipHelper::EquipItem(m_targetActor, armor);
-            }
+            ItemEquipHelper::ToggleArmorEquip(m_targetActor, armor);
         }
 
+        // Clear undress state when gear is manually changed
         bool undressStateCleared = ClearUndressStateOnGearChange();
 
-        if (!wasLocked) {
+        // Lock will be re-applied when suspension goes out of scope if was already locked,
+        // otherwise explicitly lock since this is a new change
+        if (!suspension.WasLocked()) {
             AutoLockNpc();
         }
         return undressStateCleared;
@@ -303,33 +299,26 @@ public:
     {
         if (!weapon || !m_targetActor) return false;
 
-        auto* outfitMgr = OutfitLockManager::GetSingleton();
-        bool wasLocked = outfitMgr->IsLocked(m_targetActor);
-
-        // User explicitly changing weapon → lock weapons
-        outfitMgr->SetWeaponUnlocked(m_targetActor, false);
+        // Suspend lock enforcement while we make changes
+        ScopedLockSuspension suspension(m_targetActor);
 
         if (m_targetIsPlayer) {
+            // Check if this is a transferred item (ghost entry) - if so, reverse the transfer
             if (m_transaction.IsTransferredItem(weapon->GetFormID())) {
-                outfitMgr->RemoveFromLockedOutfit(m_targetActor, weapon);
                 ReverseTransfer(weapon);
             } else {
                 EquipFromPlayer(weapon);
             }
         } else {
-            // Toggle: update outfit data before equip/unequip
-            if (ItemEquipHelper::IsWeaponEquipped(m_targetActor, weapon)) {
-                outfitMgr->RemoveFromLockedOutfit(m_targetActor, weapon);
-                ItemEquipHelper::UnequipItem(m_targetActor, weapon);
-            } else {
-                outfitMgr->AddToLockedOutfit(m_targetActor, weapon);
-                ItemEquipHelper::EquipItem(m_targetActor, weapon);
-            }
+            ItemEquipHelper::ToggleWeaponEquip(m_targetActor, weapon);
         }
 
+        // Clear undress state when gear is manually changed
         bool undressStateCleared = ClearUndressStateOnGearChange();
 
-        if (!wasLocked) {
+        // Lock will be re-applied when suspension goes out of scope if was already locked,
+        // otherwise explicitly lock since this is a new change
+        if (!suspension.WasLocked()) {
             AutoLockNpc();
         }
         return undressStateCleared;
@@ -394,37 +383,38 @@ public:
             return;
         }
 
-        auto* outfitMgr = OutfitLockManager::GetSingleton();
-        bool wasLocked = outfitMgr->IsLocked(m_targetActor);
+        // Suspend lock enforcement while we make changes
+        ScopedLockSuspension suspension(m_targetActor);
 
         // Check if NPC already has this armor in inventory
         bool hasInInventory = ItemEquipHelper::HasItemInInventory(m_targetActor, armor);
 
-        // Update outfit data before equip/unequip calls
+        // Unequip what NPC is wearing in this slot
         auto* wornArmor = ItemEquipHelper::GetWornInSlot(m_targetActor, armor);
-        if (wornArmor) {
-            outfitMgr->RemoveFromLockedOutfit(m_targetActor, wornArmor);
-        }
-        outfitMgr->AddToLockedOutfit(m_targetActor, armor);
-
-        // Now unequip/equip — hooks validate against updated data
         if (wornArmor) {
             ItemEquipHelper::UnequipItem(m_targetActor, wornArmor);
         }
 
         if (!hasInInventory) {
+            // Add armor to NPC inventory (creates a new instance)
             m_targetActor->AddObjectToContainer(armor, nullptr, 1, nullptr);
-            outfitMgr->MarkItemAsGallerySpawned(m_targetActor, armor->GetFormID());
+
+            // Mark as gallery-spawned so it gets destroyed when unequipped
+            OutfitLockManager::GetSingleton()->MarkItemAsGallerySpawned(m_targetActor, armor->GetFormID());
 
             spdlog::info("InventoryManager::EquipFromMod - Added '{}' to {}'s inventory (gallery-spawned)",
                 armor->GetFullName(), m_targetActor->GetName());
         }
 
+        // Equip the armor
         ItemEquipHelper::EquipItem(m_targetActor, armor);
 
+        // Clear undress state when gear is manually changed
         ClearUndressStateOnGearChange();
 
-        if (!wasLocked) {
+        // Lock will be re-applied when suspension goes out of scope if was already locked,
+        // otherwise explicitly lock since this is a new change
+        if (!suspension.WasLocked()) {
             AutoLockNpc();
         }
 
@@ -484,20 +474,13 @@ private:
     void EquipFromPlayer(RE::TESObjectARMO* armor)
     {
         auto* player = RE::PlayerCharacter::GetSingleton();
-        auto* outfitMgr = OutfitLockManager::GetSingleton();
         if (!player || !ItemEquipHelper::HasItemInInventory(player, armor)) {
             spdlog::warn("InventoryManager::EquipFromPlayer - Player doesn't have '{}'", armor->GetFullName());
             return;
         }
 
-        // Update outfit data before equip/unequip
+        // Unequip what NPC is wearing in this slot
         auto* wornArmor = ItemEquipHelper::GetWornInSlot(m_targetActor, armor);
-        if (wornArmor) {
-            outfitMgr->RemoveFromLockedOutfit(m_targetActor, wornArmor);
-        }
-        outfitMgr->AddToLockedOutfit(m_targetActor, armor);
-
-        // Now unequip/equip — hooks validate against updated data
         if (wornArmor) {
             ItemEquipHelper::UnequipItem(m_targetActor, wornArmor);
             if (!m_transaction.IsTransferredItem(wornArmor->GetFormID())) {
@@ -505,11 +488,13 @@ private:
             }
         }
 
+        // Transfer and equip
         ItemEquipHelper::TransferItem(player, m_targetActor, armor);
         ItemEquipHelper::EquipItem(m_targetActor, armor);
         m_transaction.TrackTransfer(armor, true);
 
-        outfitMgr->MarkItemAsPlayerGiven(m_targetActor, armor->GetFormID());
+        // Mark as player-given for persistent tracking
+        OutfitLockManager::GetSingleton()->MarkItemAsPlayerGiven(m_targetActor, armor->GetFormID());
 
         spdlog::info("InventoryManager::EquipFromPlayer - Transferred and equipped '{}' on {}",
             armor->GetFullName(), m_targetActor->GetName());
@@ -519,20 +504,13 @@ private:
     void EquipFromPlayer(RE::TESObjectWEAP* weapon)
     {
         auto* player = RE::PlayerCharacter::GetSingleton();
-        auto* outfitMgr = OutfitLockManager::GetSingleton();
         if (!player || !ItemEquipHelper::HasItemInInventory(player, weapon)) {
             spdlog::warn("InventoryManager::EquipFromPlayer - Player doesn't have '{}'", weapon->GetFullName());
             return;
         }
 
-        // Update outfit data before equip/unequip
+        // Unequip NPC's current weapons in both hands
         auto equippedWeapons = ItemEquipHelper::GetEquippedWeapons(m_targetActor);
-        for (auto* currentWeapon : equippedWeapons) {
-            outfitMgr->RemoveFromLockedOutfit(m_targetActor, currentWeapon);
-        }
-        outfitMgr->AddToLockedOutfit(m_targetActor, weapon);
-
-        // Now unequip/equip — hooks validate against updated data
         for (auto* currentWeapon : equippedWeapons) {
             if (!m_transaction.IsTransferredItem(currentWeapon->GetFormID())) {
                 m_transaction.TrackUnequip(currentWeapon);
@@ -540,11 +518,13 @@ private:
             ItemEquipHelper::UnequipItem(m_targetActor, currentWeapon);
         }
 
+        // Transfer and equip
         ItemEquipHelper::TransferItem(player, m_targetActor, weapon);
         ItemEquipHelper::EquipItem(m_targetActor, weapon);
         m_transaction.TrackTransfer(weapon, true);
 
-        outfitMgr->MarkItemAsPlayerGiven(m_targetActor, weapon->GetFormID());
+        // Mark as player-given for persistent tracking
+        OutfitLockManager::GetSingleton()->MarkItemAsPlayerGiven(m_targetActor, weapon->GetFormID());
 
         spdlog::info("InventoryManager::EquipFromPlayer - Transferred and equipped '{}' on {}",
             weapon->GetFullName(), m_targetActor->GetName());
@@ -573,9 +553,7 @@ private:
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player) return;
 
-        // Outfit data already updated by caller (RemoveFromLockedOutfit called before this)
-
-        // Unequip from NPC (hook allows — item removed from outfit)
+        // Unequip from NPC
         ItemEquipHelper::UnequipItem(m_targetActor, item);
 
         // Transfer back to player

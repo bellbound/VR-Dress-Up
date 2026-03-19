@@ -87,9 +87,9 @@ public:
         rootConfig.grabButtonMask = vr::ButtonMaskFromId(vr::k_EButton_Grip);
         rootConfig.eventCallback = &DressupMenuManager::OnEvent;
 
-        m_root = m_api->GetOrCreateRoot(rootConfig);
+        m_root = m_api->CreateRoot(rootConfig);
         if (!m_root) {
-            spdlog::error("DressupMenuManager::SetupDressUpMenu - Failed to get/create root");
+            spdlog::error("DressupMenuManager::SetupDressUpMenu - Failed to create root");
             return false;
         }
 

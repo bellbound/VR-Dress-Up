@@ -153,7 +153,6 @@ public:
 
         auto* player = RE::PlayerCharacter::GetSingleton();
         auto* equipManager = RE::ActorEquipManager::GetSingleton();
-        auto* outfitMgr = OutfitLockManager::GetSingleton();
         if (!player || !equipManager) {
             return;
         }
@@ -161,21 +160,10 @@ public:
         spdlog::info("DressupTransaction::Cancel - Reverting {} transferred items, {} unequipped items",
             m_transferredItems.size(), m_unequippedNpcItems.size());
 
-        // Update locked outfit whitelist BEFORE making equip/unequip calls
-        // Remove transferred items (they're going back to player)
-        for (const auto& transfer : m_transferredItems) {
-            if (transfer.item) {
-                outfitMgr->RemoveFromLockedOutfit(targetActor, transfer.item);
-            }
-        }
-        // Add back NPC's original items (they'll be re-equipped)
-        for (const auto& unequipped : m_unequippedNpcItems) {
-            if (unequipped.item) {
-                outfitMgr->AddToLockedOutfit(targetActor, unequipped.item);
-            }
-        }
+        // Suspend lock enforcement while we make changes to the NPC
+        ScopedLockSuspension suspension(targetActor);
 
-        // Now equip/unequip — hooks validate against updated outfit data
+        // Unequip and return transferred items to player
         for (const auto& transfer : m_transferredItems) {
             if (transfer.item) {
                 equipManager->UnequipObject(targetActor, transfer.item, nullptr, 1, nullptr, false, true);
@@ -184,9 +172,11 @@ public:
             }
         }
 
+        // Re-equip NPC's original items that were unequipped (with inventory check)
         for (const auto& unequipped : m_unequippedNpcItems) {
             if (!unequipped.item) continue;
 
+            // Check if NPC still has this item in inventory
             auto inventory = targetActor->GetInventory([&unequipped](RE::TESBoundObject& obj) {
                 return obj.GetFormID() == unequipped.item->GetFormID();
             });
@@ -200,9 +190,10 @@ public:
             spdlog::info("  Re-equipped '{}' on NPC", unequipped.item->GetName());
         }
 
-        // Restore player's equipped items (player is never locked, always allowed)
+        // Restore player's equipped items
         RestorePlayerEquipment();
 
+        // Lock will be re-applied when suspension goes out of scope (if was locked)
         Clear();
     }
 

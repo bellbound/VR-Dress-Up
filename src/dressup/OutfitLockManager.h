@@ -7,7 +7,6 @@
 #include <vector>
 #include <string>
 #include <mutex>
-#include <optional>
 #include "FormKeyUtil.h"
 
 // Stores a single armor item in a load-order-independent way
@@ -28,26 +27,12 @@ struct SavedArmorItem
         RE::FormID runtimeId = Persistence::FormKeyUtil::ResolveToRuntimeFormID(formKey);
         return RE::TESForm::LookupByID<RE::TESObjectARMO>(runtimeId);
     }
-
-    RE::TESObjectWEAP* GetWeapon() const {
-        if (formKey.empty()) return nullptr;
-        RE::FormID runtimeId = Persistence::FormKeyUtil::ResolveToRuntimeFormID(formKey);
-        return RE::TESForm::LookupByID<RE::TESObjectWEAP>(runtimeId);
-    }
-
-    // Generic form lookup (for IsInLockedOutfit checks)
-    RE::FormID GetRuntimeFormID() const {
-        if (formKey.empty()) return 0;
-        return Persistence::FormKeyUtil::ResolveToRuntimeFormID(formKey);
-    }
 };
 
-// Stores an outfit (collection of armor items + optional weapons)
+// Stores an outfit (collection of armor items)
 struct SavedOutfit
 {
-    std::vector<SavedArmorItem> items;       // armor pieces
-    std::vector<SavedArmorItem> weapons;     // weapon items (FormKey storage, same struct)
-    bool weaponUnlocked = true;              // true = weapons NOT enforced by equip hooks
+    std::vector<SavedArmorItem> items;
 };
 
 // Key for outfit storage: actor ref ID + outfit name
@@ -76,7 +61,7 @@ class OutfitLockManager : public RE::BSTEventSink<RE::TESEquipEvent>,
                           public RE::BSTEventSink<RE::TESActorLocationChangeEvent>
 {
 public:
-    static constexpr std::uint32_t kSerializationVersion = 5;  // v5: weapons + weaponUnlocked flag
+    static constexpr std::uint32_t kSerializationVersion = 4;  // v4: FormKey strings for armor items
     static constexpr std::uint32_t kOutfitRecord = '5OLF';  // 5 + OutfitLock outFit
     static constexpr std::uint32_t kPlayerItemsRecord = '5OPI';  // 5 + OutfitLock Player Items
 
@@ -123,31 +108,6 @@ public:
 
     // Check if an actor is locked
     bool IsLocked(RE::Actor* actor) const;
-
-    // === Locked Outfit Modification (for declare-before-act pattern) ===
-
-    // Add an item to the locked outfit. Creates "locked" outfit if it doesn't exist.
-    // Armor: adds to items list (removes conflicting slot occupant).
-    // Weapon: adds to weapons list, sets weaponUnlocked = false.
-    void AddToLockedOutfit(RE::Actor* actor, RE::TESBoundObject* item);
-
-    // Remove an item from the locked outfit. No-op if not found.
-    // Armor: removes from items list.
-    // Weapon: removes from weapons list (does NOT auto-set weaponUnlocked).
-    void RemoveFromLockedOutfit(RE::Actor* actor, RE::TESBoundObject* item);
-
-    // Bulk replace the locked outfit data (for restore/redress operations)
-    void SetLockedOutfitData(RE::Actor* actor, const SavedOutfit& outfit);
-
-    // Get outfit data by name (for copy/restore, e.g. preundress → locked)
-    std::optional<SavedOutfit> GetOutfitData(RE::Actor* actor, const std::string& outfitName) const;
-
-    // Query: is a specific item in the locked outfit? (used by equip hooks)
-    bool IsInLockedOutfit(RE::Actor* actor, RE::TESBoundObject* item) const;
-
-    // Weapon lock control
-    bool IsWeaponUnlocked(RE::Actor* actor) const;
-    void SetWeaponUnlocked(RE::Actor* actor, bool unlocked);
 
     // === Player Item Tracking ===
 
@@ -241,3 +201,37 @@ private:
     mutable std::mutex m_mutex;
 };
 
+// RAII helper for outfit modifications on potentially locked actors
+// - Tracks whether actor was locked before changes
+// - Re-saves the locked outfit on scope exit to capture changes
+// Usage: ScopedLockSuspension suspension(actor);
+//        ... make outfit changes ...
+//        if (!suspension.WasLocked()) { AutoLockNpc(); }
+class ScopedLockSuspension
+{
+public:
+    explicit ScopedLockSuspension(RE::Actor* actor)
+        : m_actor(actor)
+        , m_wasLocked(actor ? OutfitLockManager::GetSingleton()->IsLocked(actor) : false)
+    {
+    }
+
+    ~ScopedLockSuspension()
+    {
+        // Re-save the locked outfit to capture any changes made during this scope
+        if (m_actor && m_wasLocked) {
+            OutfitLockManager::GetSingleton()->SaveOutfit(m_actor, "locked");
+        }
+    }
+
+    // Was the actor locked before we started?
+    bool WasLocked() const { return m_wasLocked; }
+
+    // Non-copyable
+    ScopedLockSuspension(const ScopedLockSuspension&) = delete;
+    ScopedLockSuspension& operator=(const ScopedLockSuspension&) = delete;
+
+private:
+    RE::Actor* m_actor;
+    bool m_wasLocked;
+};
