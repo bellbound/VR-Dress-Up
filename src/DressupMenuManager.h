@@ -87,7 +87,7 @@ public:
         rootConfig.grabButtonMask = vr::ButtonMaskFromId(vr::k_EButton_Grip);
         rootConfig.eventCallback = &DressupMenuManager::OnEvent;
 
-        m_root = m_api->CreateRoot(rootConfig);
+        m_root = m_api->GetOrCreateRoot(rootConfig);
         if (!m_root) {
             spdlog::error("DressupMenuManager::SetupDressUpMenu - Failed to create root");
             return false;
@@ -127,6 +127,7 @@ public:
 
         m_galleryRow = m_api->CreateColumnGrid(galleryConfig);
         if (m_galleryRow) {
+            m_galleryRow->SetOrigin(P3DUI::VerticalOrigin::Center, P3DUI::HorizontalOrigin::Center);
             m_root->AddChild(m_galleryRow);
             m_galleryRow->SetLocalPosition(0, 0, -20.0f);  // Below handle row
             m_galleryRow->SetVisible(false);  // Hidden by default

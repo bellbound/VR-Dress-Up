@@ -122,20 +122,29 @@ RE::FormID FormKeyUtil::ResolveToRuntimeFormID(std::string_view keyString)
         return 0;
     }
 
-    // Combine local FormID with the file's compile index to get runtime FormID
-    // For regular plugins: compileIndex goes in upper byte
-    // For light plugins (ESL): uses smallFileCompileIndex in different position
-    RE::FormID runtimeFormId = parsed->localFormId;
-
-    if (file->IsLight()) {
-        // Light plugin: FE in top byte, smallFileCompileIndex in next 12 bits
-        runtimeFormId |= (0xFE000000 | (static_cast<uint32_t>(file->GetSmallFileCompileIndex()) << 12));
-    } else {
-        // Regular plugin: compileIndex in top byte
-        runtimeFormId |= (static_cast<uint32_t>(file->GetCompileIndex()) << 24);
+    // Resolve through TESDataHandler rather than synthesising the runtime FormID
+    // by hand.
+    //
+    // The previous implementation branched on `TESFile::IsLight()` and built
+    // `0xFE000000 | (smallFileCompileIndex << 12)`. `IsLight()` reports the
+    // plugin's own kSmallFile header flag regardless of whether the *runtime*
+    // supports ESLs - and Skyrim VR (1.4.15) has no ESL space at all. On VR an
+    // ESL-flagged plugin occupies an ordinary compile-index slot, so that
+    // synthesis produced an ID that resolves to nothing.
+    //
+    // That mattered a great deal here: a null lookup makes SavedArmorItem::GetArmor()
+    // return nullptr, ApplyOutfit treats the item as "no longer valid", and it is
+    // then **permanently removed from the stored outfit**. On VR, every ESL-sourced
+    // armour piece was being silently deleted from saved outfits.
+    //
+    // TESDataHandler::LookupForm contains the REL::Module::IsVR() branch and gets
+    // this right on both runtimes.
+    auto* form = dataHandler->LookupForm(parsed->localFormId, file->GetFilename());
+    if (!form) {
+        spdlog::warn("FormKeyUtil: {} not found in {}", parsed->localFormId, parsed->pluginName);
+        return 0;
     }
-
-    return runtimeFormId;
+    return form->GetFormID();
 }
 
 } // namespace Persistence

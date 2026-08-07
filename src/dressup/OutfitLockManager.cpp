@@ -659,8 +659,26 @@ void OutfitLockManager::OnGameSave(SKSE::SerializationInterface* a_intfc)
             a_intfc->WriteRecordData(item.formKey.data(), keyLen);
         }
 
-        spdlog::info("  - Saved outfit '{}' for actor 0x{:08X} with {} items",
-            key.outfitName, key.actorRefID, itemCount);
+        // v5: the actor's own FormKey. `key.actorRefID` above is a *runtime* ref ID
+        // and is only meaningful inside the load order that produced it, so on its
+        // own an outfit can end up attached to a different NPC after a plugin is
+        // added or removed. Derived fresh here rather than trusting a cached value,
+        // so it is always consistent with the ID beside it.
+        std::string actorFormKey = outfit.actorFormKey;
+        if (actorFormKey.empty()) {
+            if (auto* actorForm = RE::TESForm::LookupByID(key.actorRefID)) {
+                actorFormKey = Persistence::FormKeyUtil::BuildFormKey(actorForm);
+            }
+        }
+        std::uint32_t actorKeyLen = static_cast<std::uint32_t>(actorFormKey.size());
+        a_intfc->WriteRecordData(&actorKeyLen, sizeof(actorKeyLen));
+        if (actorKeyLen > 0) {
+            a_intfc->WriteRecordData(actorFormKey.data(), actorKeyLen);
+        }
+
+        spdlog::info("  - Saved outfit '{}' for actor 0x{:08X} ('{}') with {} items",
+            key.outfitName, key.actorRefID,
+            actorFormKey.empty() ? "dynamic/unknown" : actorFormKey, itemCount);
     }
 
     // === Save Player Given Items ===
@@ -710,9 +728,11 @@ void OutfitLockManager::OnLoadRecord(SKSE::SerializationInterface* a_intfc,
     std::lock_guard<std::mutex> lock(mgr->m_mutex);
 
     if (type == kOutfitRecord) {
-            if (version != kSerializationVersion) {
-                spdlog::warn("OutfitLockManager::OnLoadRecord - Incompatible outfit version {} (expected {}), skipping",
-                    version, kSerializationVersion);
+            // v4 and v5 are both readable: v5 only appends a field per outfit, so an
+            // older co-save loads fine and simply carries no actorFormKey.
+            if (version < kMinReadableVersion || version > kSerializationVersion) {
+                spdlog::warn("OutfitLockManager::OnLoadRecord - Incompatible outfit version {} (readable range {}..{}), skipping",
+                    version, kMinReadableVersion, kSerializationVersion);
                 // Skip by consuming remaining bytes (already read type/version/length)
                 if (length > 0) {
                     std::vector<char> skipBuffer(length);
@@ -731,58 +751,67 @@ void OutfitLockManager::OnLoadRecord(SKSE::SerializationInterface* a_intfc,
                 a_intfc->ReadRecordData(&oldActorID, sizeof(oldActorID));
 
                 RE::FormID newActorID = 0;
-                if (!a_intfc->ResolveFormID(oldActorID, newActorID)) {
-                    spdlog::warn("  - Cannot resolve actor 0x{:08X}, skipping outfit", oldActorID);
+                const bool skseResolved = a_intfc->ResolveFormID(oldActorID, newActorID);
 
-                    // Skip outfit name
-                    std::uint32_t nameLen = 0;
-                    a_intfc->ReadRecordData(&nameLen, sizeof(nameLen));
-                    std::string dummyName(nameLen, '\0');
-                    a_intfc->ReadRecordData(dummyName.data(), nameLen);
-
-                    // Skip items (now formKey strings)
-                    std::uint32_t itemCount = 0;
-                    a_intfc->ReadRecordData(&itemCount, sizeof(itemCount));
-                    for (std::uint32_t j = 0; j < itemCount; ++j) {
-                        std::uint32_t keyLen = 0;
-                        a_intfc->ReadRecordData(&keyLen, sizeof(keyLen));
-                        std::string dummyKey(keyLen, '\0');
-                        a_intfc->ReadRecordData(dummyKey.data(), keyLen);
-                    }
-                    continue;
-                }
-
-                // Read outfit name
+                // The record still has to be consumed in full even when we intend to
+                // drop it, or every subsequent outfit reads from the wrong offset.
+                // Read first, decide afterwards.
                 std::uint32_t nameLen = 0;
                 a_intfc->ReadRecordData(&nameLen, sizeof(nameLen));
                 std::string outfitName(nameLen, '\0');
                 a_intfc->ReadRecordData(outfitName.data(), nameLen);
 
-                // Read items (formKey strings)
                 std::uint32_t itemCount = 0;
                 a_intfc->ReadRecordData(&itemCount, sizeof(itemCount));
 
                 SavedOutfit outfit;
-                std::uint32_t validCount = 0;
-
                 for (std::uint32_t j = 0; j < itemCount; ++j) {
-                    // Read formKey string
                     std::uint32_t keyLen = 0;
                     a_intfc->ReadRecordData(&keyLen, sizeof(keyLen));
                     std::string formKey(keyLen, '\0');
                     a_intfc->ReadRecordData(formKey.data(), keyLen);
 
-                    // FormKey resolution happens lazily in IsValid()/GetArmor()
-                    // Just store the key - it will be validated when applied
+                    // FormKey resolution happens lazily in IsValid()/GetArmor().
                     SavedArmorItem item;
                     item.formKey = formKey;
                     outfit.items.push_back(item);
-                    ++validCount;
-
                     spdlog::trace("    - Loaded armor key: {}", formKey);
                 }
 
-                // Store the outfit
+                if (version >= 5) {
+                    std::uint32_t actorKeyLen = 0;
+                    a_intfc->ReadRecordData(&actorKeyLen, sizeof(actorKeyLen));
+                    if (actorKeyLen > 0) {
+                        outfit.actorFormKey.resize(actorKeyLen);
+                        a_intfc->ReadRecordData(outfit.actorFormKey.data(), actorKeyLen);
+                    }
+                }
+
+                // Prefer the FormKey over SKSE's ref-ID resolution. SKSE can only
+                // remap an ID whose *plugin* is still at a known index; the FormKey
+                // carries the plugin name, so it survives reordering that the raw ID
+                // does not.
+                if (!outfit.actorFormKey.empty()) {
+                    const RE::FormID fromKey =
+                        Persistence::FormKeyUtil::ResolveToRuntimeFormID(outfit.actorFormKey);
+                    if (fromKey != 0) {
+                        if (skseResolved && fromKey != newActorID) {
+                            spdlog::info(
+                                "  - Actor key '{}' resolves to 0x{:08X}, SKSE said 0x{:08X}; "
+                                "trusting the FormKey",
+                                outfit.actorFormKey, fromKey, newActorID);
+                        }
+                        newActorID = fromKey;
+                    }
+                }
+
+                if (newActorID == 0) {
+                    spdlog::warn("  - Cannot resolve actor 0x{:08X} ('{}'), dropping outfit '{}'",
+                        oldActorID, outfit.actorFormKey, outfitName);
+                    continue;
+                }
+
+                const std::uint32_t validCount = static_cast<std::uint32_t>(outfit.items.size());
                 OutfitKey key{newActorID, outfitName};
                 mgr->m_outfits[key] = std::move(outfit);
 
@@ -943,4 +972,176 @@ void OutfitLockManager::ApplyLockedOutfitsInLocation(RE::BGSLocation* location)
     for (auto* actor : actorsToProcess) {
         ApplyOutfit(actor, "locked", true);
     }
+}
+
+// =============================================================================
+// Interface002 support: enumeration and FormKey injection
+// =============================================================================
+//
+// These are the surface Save Migration drives. They deal only in FormKeys, so an
+// outfit set can be read out of one savegame and written into another without
+// either side touching a runtime form ID.
+
+std::vector<std::string> OutfitLockManager::EnumerateOutfitNames(RE::Actor* actor) const
+{
+    std::vector<std::string> names;
+    if (!actor) {
+        return names;
+    }
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const RE::FormID actorID = actor->GetFormID();
+    for (const auto& [key, outfit] : m_outfits) {
+        if (key.actorRefID == actorID) {
+            names.push_back(key.outfitName);
+        }
+    }
+    return names;
+}
+
+std::vector<std::string> OutfitLockManager::GetOutfitItemFormKeys(RE::Actor* actor,
+    const std::string& outfitName) const
+{
+    std::vector<std::string> keys;
+    if (!actor) {
+        return keys;
+    }
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const auto it = m_outfits.find(OutfitKey{actor->GetFormID(), outfitName});
+    if (it == m_outfits.end()) {
+        return keys;
+    }
+    keys.reserve(it->second.items.size());
+    for (const auto& item : it->second.items) {
+        keys.push_back(item.formKey);
+    }
+    return keys;
+}
+
+std::vector<std::string> OutfitLockManager::GetPlayerGivenFormKeys(RE::Actor* actor) const
+{
+    std::vector<std::string> keys;
+    if (!actor) {
+        return keys;
+    }
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const auto it = m_playerGivenItems.find(actor->GetFormID());
+    if (it == m_playerGivenItems.end()) {
+        return keys;
+    }
+    // The set holds runtime FormIDs; converting to FormKeys here is what makes the
+    // list meaningful outside this session.
+    for (const RE::FormID itemID : it->second) {
+        if (auto* form = RE::TESForm::LookupByID(itemID)) {
+            auto key = Persistence::FormKeyUtil::BuildFormKey(form);
+            if (!key.empty()) {
+                keys.push_back(std::move(key));
+            }
+        }
+    }
+    return keys;
+}
+
+std::uint32_t OutfitLockManager::SetOutfitFromFormKeys(RE::Actor* actor,
+    const std::string& outfitName, const std::vector<std::string>& formKeys)
+{
+    if (!actor || outfitName.empty()) {
+        return 0;
+    }
+
+    SavedOutfit outfit;
+    outfit.actorFormKey = Persistence::FormKeyUtil::BuildFormKey(actor);
+
+    std::uint32_t accepted = 0;
+    for (const auto& formKey : formKeys) {
+        if (formKey.empty()) {
+            continue;
+        }
+        // Verify the key resolves to an actual armour piece before storing it.
+        // Storing an unresolvable key would be pruned on the first apply anyway, and
+        // the pruning rewrites the map - so it is cheaper and safer to reject here.
+        const RE::FormID runtimeID = Persistence::FormKeyUtil::ResolveToRuntimeFormID(formKey);
+        if (runtimeID == 0 || !RE::TESForm::LookupByID<RE::TESObjectARMO>(runtimeID)) {
+            spdlog::warn("SetOutfitFromFormKeys - '{}' does not resolve to armour here, skipping",
+                formKey);
+            continue;
+        }
+        SavedArmorItem item;
+        item.formKey = formKey;
+        outfit.items.push_back(std::move(item));
+        ++accepted;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_outfits[OutfitKey{actor->GetFormID(), outfitName}] = std::move(outfit);
+    }
+
+    spdlog::info("SetOutfitFromFormKeys - '{}' for 0x{:08X}: {}/{} key(s) accepted",
+        outfitName, actor->GetFormID(), accepted, formKeys.size());
+    return accepted;
+}
+
+std::uint32_t OutfitLockManager::MarkPlayerGivenFromFormKeys(RE::Actor* actor,
+    const std::vector<std::string>& formKeys)
+{
+    if (!actor) {
+        return 0;
+    }
+    std::uint32_t accepted = 0;
+    for (const auto& formKey : formKeys) {
+        const RE::FormID runtimeID = Persistence::FormKeyUtil::ResolveToRuntimeFormID(formKey);
+        if (runtimeID == 0) {
+            continue;
+        }
+        MarkItemAsPlayerGiven(actor, runtimeID);
+        ++accepted;
+    }
+    return accepted;
+}
+
+std::uint32_t OutfitLockManager::EnsureOutfitItemsInInventory(RE::Actor* actor,
+    const std::string& outfitName)
+{
+    if (!actor) {
+        return 0;
+    }
+
+    // Snapshot the keys under the lock, then add outside it: AddObjectToContainer can
+    // fire equip events that re-enter this manager.
+    std::vector<std::string> keys;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it = m_outfits.find(OutfitKey{actor->GetFormID(), outfitName});
+        if (it == m_outfits.end()) {
+            return 0;
+        }
+        for (const auto& item : it->second.items) {
+            keys.push_back(item.formKey);
+        }
+    }
+
+    std::uint32_t added = 0;
+    for (const auto& formKey : keys) {
+        auto* armor = RE::TESForm::LookupByID<RE::TESObjectARMO>(
+            Persistence::FormKeyUtil::ResolveToRuntimeFormID(formKey));
+        if (!armor) {
+            continue;
+        }
+        const auto counts = actor->GetInventoryCounts();
+        const auto found = counts.find(static_cast<RE::TESBoundObject*>(armor));
+        if (found != counts.end() && found->second > 0) {
+            continue;  // already has it
+        }
+        actor->AddObjectToContainer(armor, nullptr, 1, nullptr);
+        ++added;
+        spdlog::info("EnsureOutfitItemsInInventory - added '{}' ({}) to 0x{:08X}",
+            armor->GetFullName(), formKey, actor->GetFormID());
+    }
+
+    if (added > 0) {
+        spdlog::info("EnsureOutfitItemsInInventory - '{}': {} item(s) added. Without this, "
+            "ApplyOutfit would prune them from the stored outfit permanently.",
+            outfitName, added);
+    }
+    return added;
 }

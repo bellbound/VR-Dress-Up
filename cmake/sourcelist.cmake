@@ -8,5 +8,6 @@ set(sources ${sources}
     src/api/ThreeDUIInterface001.cpp
     src/api/ThreeDUIActorMenu.cpp
     src/api/DressUpInterface001.cpp
+    src/api/DressUpInterface002.cpp
     external/PapyrusVRTypes.cpp
 )

@@ -33,6 +33,18 @@ struct SavedArmorItem
 struct SavedOutfit
 {
     std::vector<SavedArmorItem> items;
+
+    // FormKey of the actor this outfit belongs to, e.g. "0x13BBF~Skyrim.esm".
+    //
+    // Stored alongside OutfitKey::actorRefID from serialization v5 onwards. The
+    // in-memory key stays the runtime ref ID (so nothing else has to change), but
+    // the *persisted* identity is now load-order independent: a runtime ref ID is
+    // only meaningful within the load order that produced it, so an outfit saved
+    // under one load order used to attach to a different NPC - or to nobody - after
+    // a plugin was added or removed.
+    //
+    // Empty for records loaded from v4 or earlier, and for dynamic actors.
+    std::string actorFormKey;
 };
 
 // Key for outfit storage: actor ref ID + outfit name
@@ -61,7 +73,11 @@ class OutfitLockManager : public RE::BSTEventSink<RE::TESEquipEvent>,
                           public RE::BSTEventSink<RE::TESActorLocationChangeEvent>
 {
 public:
-    static constexpr std::uint32_t kSerializationVersion = 4;  // v4: FormKey strings for armor items
+    // v4: FormKey strings for armor items
+    // v5: + actorFormKey per outfit, so the *actor* identity is load-order
+    //     independent too. v4 records still load; they simply have no actorFormKey.
+    static constexpr std::uint32_t kSerializationVersion = 5;
+    static constexpr std::uint32_t kMinReadableVersion = 4;
     static constexpr std::uint32_t kOutfitRecord = '5OLF';  // 5 + OutfitLock outFit
     static constexpr std::uint32_t kPlayerItemsRecord = '5OPI';  // 5 + OutfitLock Player Items
 
@@ -165,6 +181,39 @@ public:
 
     // Apply locked outfits to NPCs in the given location (or current cell if null)
     void ApplyLockedOutfitsInLocation(RE::BGSLocation* location = nullptr);
+
+    // === Interface002 support: enumeration and FormKey injection ===
+    //
+    // These exist so an outfit set can be read out of one savegame and written into
+    // another without either side handling runtime form IDs.
+
+    // Names of every outfit stored for this actor, including "locked" and "default".
+    std::vector<std::string> EnumerateOutfitNames(RE::Actor* actor) const;
+
+    // FormKeys of the armour in one stored outfit, in stored order.
+    std::vector<std::string> GetOutfitItemFormKeys(RE::Actor* actor,
+                                                  const std::string& outfitName) const;
+
+    // FormKeys of the items this actor was given by the player.
+    std::vector<std::string> GetPlayerGivenFormKeys(RE::Actor* actor) const;
+
+    // Replace (or create) an outfit from FormKeys. Map only - equips nothing and
+    // does not touch inventory. Returns the number of keys accepted.
+    uint32_t SetOutfitFromFormKeys(RE::Actor* actor, const std::string& outfitName,
+                                   const std::vector<std::string>& formKeys);
+
+    // Re-register player-given items from FormKeys. Returns the number accepted.
+    uint32_t MarkPlayerGivenFromFormKeys(RE::Actor* actor,
+                                         const std::vector<std::string>& formKeys);
+
+    // Add any item of a stored outfit that the actor does not already have.
+    // Returns the number added.
+    //
+    // MUST be called before applying a freshly injected outfit: ApplyOutfit prunes
+    // items the actor does not have, and that pruning rewrites the stored map - so
+    // applying against an empty inventory destroys the outfit rather than just
+    // failing to dress the actor.
+    uint32_t EnsureOutfitItemsInInventory(RE::Actor* actor, const std::string& outfitName);
 
 private:
     OutfitLockManager() = default;

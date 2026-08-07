@@ -76,6 +76,12 @@ bool IsMenuOpeningEnabledInternal() {
     return g_menuOpeningEnabled;
 }
 
+// Shared with Interface002 so both interfaces drive the same toggle rather than
+// each keeping its own idea of it.
+void SetMenuOpeningEnabledInternal(bool enabled) {
+    g_menuOpeningEnabled = enabled;
+}
+
 } // namespace DressUp
 
 // =============================================================================
@@ -84,11 +90,22 @@ bool IsMenuOpeningEnabledInternal() {
 
 // Export function for other plugins to call
 // Uses extern "C" to prevent name mangling
+#include "DressUpInterface002.h"
+
+namespace DressUp {
+// Implemented in DressUpInterface002.cpp, where Interface002Impl is complete. An
+// accessor rather than an extern object, so this file never needs the concrete type.
+Interface002* GetInterface002Impl();
+}  // namespace DressUp
+
 extern "C" __declspec(dllexport) void* GetDressUpInterface(unsigned int version) {
     spdlog::info("DressUp: GetDressUpInterface called with version {}", version);
 
     if (version == 1) {
         return static_cast<DressUp::Interface001*>(&DressUp::g_interface);
+    }
+    if (version == 2) {
+        return DressUp::GetInterface002Impl();
     }
 
     spdlog::warn("DressUp: Unknown interface version {} requested", version);
