@@ -1,5 +1,12 @@
 #include "PapyrusBridge.h"
+
+#include <chrono>
+#include <thread>
 #include <spdlog/spdlog.h>
+
+// Windows.h turns GetObject into GetObjectA, and something in the PCH pulls it back in
+// after Variable.h has already undone it.
+#undef GetObject
 
 namespace PapyrusBridge
 {
@@ -26,6 +33,42 @@ namespace PapyrusBridge
 
         private:
             IntResult m_fn;
+        };
+
+        // Same, for a call whose return value is a form.
+        class FormCallback : public RE::BSScript::IStackCallbackFunctor
+        {
+        public:
+            FormCallback(RE::FormType formType, FormResult fn)
+                : m_formType(formType), m_fn(std::move(fn)) {}
+
+            void operator()(RE::BSScript::Variable a_result) override
+            {
+                if (!m_fn) return;
+
+                RE::TESForm* form = nullptr;
+                if (a_result.IsObject() && !a_result.IsNoneObject()) {
+                    if (auto object = a_result.GetObject()) {
+                        auto* vm = RE::BSScript::Internal::VirtualMachine::GetSingleton();
+                        auto* policy = vm ? vm->GetObjectHandlePolicy() : nullptr;
+                        if (policy) {
+                            // The VMTypeID overload, spelled out: FormType converts to
+                            // VMTypeID implicitly, so the two overloads are ambiguous.
+                            void* raw = policy->GetObjectForHandle(
+                                static_cast<RE::VMTypeID>(m_formType), object->GetHandle());
+                            form = static_cast<RE::TESForm*>(raw);
+                        }
+                    }
+                }
+                m_fn(form);
+            }
+
+            bool CanSave() const override { return false; }
+            void SetObject(const RE::BSTSmartPointer<RE::BSScript::Object>&) override {}
+
+        private:
+            RE::FormType m_formType;
+            FormResult   m_fn;
         };
 
         RE::BSScript::IVirtualMachine* GetVM()
@@ -133,6 +176,33 @@ namespace PapyrusBridge
             spdlog::warn("PapyrusBridge::CallMethodInt - {}.{} dispatch failed", scriptName, fnName);
         }
         return ok;
+    }
+
+    bool CallGlobalForm(const char* className, const char* fnName, RE::FormType formType,
+                        RE::BSScript::IFunctionArguments* args, FormResult result)
+    {
+        auto* vm = GetVM();
+        if (!vm) return false;
+
+        RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback(
+            new FormCallback(formType, std::move(result)));
+        const bool ok = vm->DispatchStaticCall(className, fnName, args, callback);
+        if (!ok) {
+            spdlog::warn("PapyrusBridge::CallGlobalForm - {}.{} dispatch failed", className, fnName);
+        }
+        return ok;
+    }
+
+    void RunAfterMs(std::int32_t delayMs, std::function<void()> fn)
+    {
+        if (!fn) return;
+
+        std::thread([delayMs, fn = std::move(fn)]() mutable {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+            if (auto* task = SKSE::GetTaskInterface()) {
+                task->AddTask(std::move(fn));
+            }
+        }).detach();
     }
 
     void SendModEvent(const std::string& eventName, const std::string& strArg,

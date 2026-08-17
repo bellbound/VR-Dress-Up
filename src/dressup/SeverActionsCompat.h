@@ -1,6 +1,7 @@
 #pragma once
 
 #include <RE/Skyrim.h>
+#include <functional>
 #include <string>
 
 // SeverActions has its own outfit manager, and it is the more determined one: a quest
@@ -14,12 +15,21 @@
 // and it does the ownership tagging (catalog-supplied vs the player's own items) that
 // makes preset switching non-destructive.
 //
-// We still assign our own outfit record on top, because that is the SPID handoff and
-// SeverActions deliberately never calls SetOutfit on its apply path.
+// The outfit record we then assign is SeverActions' own. It scaffolds 800 OTFT records
+// (100 slots x 8 presets) and, since 3.9.2, never applies them - its apply path is
+// deliberately SetOutfit-free. So the record for our preset is sitting there unused: we
+// fill it and assign it, which is the SPID handoff, without touching anything
+// SeverActions relies on. The record is obtained from SeverActions itself rather than
+// looked up, so we are not guessing at its FormID layout or at EditorIDs the runtime
+// does not keep.
 namespace SeverActionsCompat
 {
     // The preset name we own on the SeverActions side.
     inline constexpr const char* kPresetName = "VRDressUp";
+
+    // The SeverActions main quest, which carries SeverActions_OutfitSlot.
+    inline constexpr RE::FormID kQuestID = 0x000D62;
+    inline constexpr const char* kPluginName = "SeverActions.esp";
 
     // Detect SeverActions. Call at kDataLoaded, before OutfitFormBackend::Initialize.
     void Initialize();
@@ -28,6 +38,12 @@ namespace SeverActionsCompat
 
     // Snapshot the actor's current look into our SeverActions preset.
     void HandOffOutfit(RE::Actor* actor);
+
+    // Resolve the OTFT record backing our preset for this actor, so we can fill and
+    // assign it: GetSlot -> FindPresetIndexByName -> GetOutfitForm, each a call into
+    // SeverActions. Retries, because the preset is built by Papyrus on its own
+    // schedule after HandOffOutfit. Calls back with nullptr once it gives up.
+    void AcquirePresetOutfit(RE::Actor* actor, std::function<void(RE::BGSOutfit*)> done);
 
     // Drop the preset we created.
     void ReleaseOutfit(RE::Actor* actor);

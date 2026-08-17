@@ -460,7 +460,15 @@ void OutfitLockManager::PromoteLockToOutfitForm(RE::Actor* actor)
     if (!actor) return;
 
     auto* backend = OutfitFormBackend::GetSingleton();
-    if (!backend->IsAvailable()) return;
+    if (!backend->IsAvailable() || !backend->IsEligible(actor)) return;
+
+    // Under SeverActions the record we assign is one of its own, which it only creates
+    // once it has finished building the preset. Ask for it, and assign whatever comes
+    // back - our own pool if it never produces one.
+    if (SeverActionsCompat::IsActive() && !backend->HasOutfitRecord(actor)) {
+        backend->ReacquireExternal(actor);
+        return;
+    }
 
     backend->Apply(actor, GetOutfitItemFormKeys(actor, "locked"));
 }

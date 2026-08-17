@@ -25,7 +25,10 @@
 class OutfitFormBackend
 {
 public:
-    static constexpr std::uint32_t kSerializationVersion = 1;
+    // v1: actor key, pool index, original outfit, last applied item set
+    // v2: + whether the record came from another mod, so a load re-acquires it
+    static constexpr std::uint32_t kSerializationVersion = 2;
+    static constexpr std::uint32_t kMinReadableVersion = 1;
     static constexpr std::uint32_t kRecord = '5OSF';  // 5 + OutfitLock outfit Form
 
     // Pool layout in VRDressUp.esp. Records are contiguous from kFirstOutfitID.
@@ -33,6 +36,9 @@ public:
     static constexpr RE::FormID  kBlankOutfitID = 0x800;
     static constexpr RE::FormID  kFirstOutfitID = 0x801;
     static constexpr std::size_t kPoolSize = 128;
+
+    // Assignment holds no record of our own - it is borrowing one.
+    static constexpr std::size_t kNoPoolSlot = static_cast<std::size_t>(-1);
 
     static OutfitFormBackend* GetSingleton()
     {
@@ -66,6 +72,20 @@ public:
     // the actor's current outfit are both already what we last applied.
     bool Apply(RE::Actor* actor, const std::vector<std::string>& formKeys);
 
+    // Use this record for the actor instead of one from our pool. Under SeverActions
+    // that is its own per-slot OTFT, so the outfit we assign is the one its wardrobe
+    // already describes. Session-only: re-acquired after every load.
+    void SetExternalOutfit(RE::Actor* actor, RE::BGSOutfit* outfit);
+
+    // Stop borrowing and go back to our own pool.
+    void ClearExternalOutfit(RE::Actor* actor);
+
+    // True once the actor has a record to assign, borrowed or our own.
+    bool HasOutfitRecord(RE::Actor* actor) const;
+
+    // Ask the provider for the actor's record again and re-assign once it answers.
+    void ReacquireExternal(RE::Actor* actor);
+
     // Put the actor's original outfit back and release its pool slot, so SPID can
     // resume distributing to them.
     bool Restore(RE::Actor* actor);
@@ -95,6 +115,12 @@ private:
         std::size_t              poolIndex = 0;
         std::string              originalOutfitKey;  // empty if the NPC had no outfit
         std::vector<std::string> lastApplied;        // sorted; the change detector
+
+        // A record owned by another mod, used in place of our pool slot. Not
+        // persisted - the provider hands it back on request each session - but the
+        // fact that we had one is, so a load knows to go and ask again.
+        RE::BGSOutfit* externalOutfit = nullptr;
+        bool           usesExternal = false;
     };
 
     // Resolve the pool out of VRDressUp.esp by local FormID. Deterministic, and
