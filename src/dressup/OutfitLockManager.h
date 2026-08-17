@@ -125,6 +125,11 @@ public:
     // Check if an actor is locked
     bool IsLocked(RE::Actor* actor) const;
 
+    // Push the actor's "locked" outfit into a real Outfit form and assign it, which is
+    // what makes SPID suspend distribution for them. Safe to call repeatedly: it
+    // no-ops when neither the item set nor the assigned outfit has changed.
+    void PromoteLockToOutfitForm(RE::Actor* actor);
+
     // === Player Item Tracking ===
 
     // Mark an item as given from player to this actor
@@ -269,7 +274,9 @@ public:
     {
         // Re-save the locked outfit to capture any changes made during this scope
         if (m_actor && m_wasLocked) {
-            OutfitLockManager::GetSingleton()->SaveOutfit(m_actor, "locked");
+            auto* mgr = OutfitLockManager::GetSingleton();
+            mgr->SaveOutfit(m_actor, "locked");
+            mgr->PromoteLockToOutfitForm(m_actor);
         }
     }
 

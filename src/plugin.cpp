@@ -6,6 +6,8 @@
 #include "DressupMenuManager.h"
 #include "MenuChecker.h"
 #include "dressup/OutfitLockManager.h"
+#include "dressup/OutfitFormBackend.h"
+#include "dressup/SeverActionsCompat.h"
 #include "dressup/UndressManager.h"
 #include "dressup/GalleryStateManager.h"
 #include "dressup/ArmorModManager.h"
@@ -21,6 +23,7 @@ namespace SerializationCallbacks
     void OnGameSave(SKSE::SerializationInterface* a_intfc)
     {
         OutfitLockManager::OnGameSave(a_intfc);
+        OutfitFormBackend::OnGameSave(a_intfc);
         UndressManager::OnGameSave(a_intfc);
         GalleryStateManager::OnGameSave(a_intfc);
     }
@@ -29,6 +32,7 @@ namespace SerializationCallbacks
     {
         // Clear all managers before processing records
         OutfitLockManager::OnPreLoad();
+        OutfitFormBackend::OnPreLoad();
         UndressManager::OnPreLoad();
         GalleryStateManager::OnPreLoad();
 
@@ -39,6 +43,9 @@ namespace SerializationCallbacks
             case OutfitLockManager::kOutfitRecord:
             case OutfitLockManager::kPlayerItemsRecord:
                 OutfitLockManager::OnLoadRecord(a_intfc, type, version, length);
+                break;
+            case OutfitFormBackend::kRecord:
+                OutfitFormBackend::OnLoadRecord(a_intfc, type, version, length);
                 break;
             case UndressManager::kUndressRecord:
                 UndressManager::OnLoadRecord(a_intfc, type, version, length);
@@ -62,6 +69,7 @@ namespace SerializationCallbacks
     void OnRevert(SKSE::SerializationInterface* a_intfc)
     {
         OutfitLockManager::OnRevert(a_intfc);
+        OutfitFormBackend::OnRevert(a_intfc);
         UndressManager::OnRevert(a_intfc);
         GalleryStateManager::OnRevert(a_intfc);
     }
@@ -108,6 +116,10 @@ void MessageHandler(SKSE::MessagingInterface::Message* a_msg)
 
 		// Initialize InputDispatcher (registers button callbacks)
 		InputDispatcher::GetSingleton()->Initialize();
+
+		// Outfit backend: detect SeverActions first, then resolve the outfit pool
+		SeverActionsCompat::Initialize();
+		OutfitFormBackend::GetSingleton()->Initialize();
 
 		// Note: ArmorModManager cache is built lazily on first gallery open
 		// to avoid blocking startup and potential timing issues with VR init

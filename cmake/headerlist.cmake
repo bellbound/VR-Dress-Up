@@ -16,6 +16,9 @@ set(headers ${headers}
     src/dressup/DressupTransaction.h
     src/dressup/ItemEquipHelper.h
     src/dressup/OutfitLockManager.h
+    src/dressup/OutfitFormBackend.h
+    src/dressup/SeverActionsCompat.h
+    src/dressup/PapyrusBridge.h
     src/util/VRNodes.h
     external/VRManagerAPI.h
     external/PapyrusVRTypes.h

@@ -1,4 +1,6 @@
 #include "OutfitLockManager.h"
+#include "OutfitFormBackend.h"
+#include "SeverActionsCompat.h"
 #include <spdlog/spdlog.h>
 
 // Biped slots for body armor (30-45)
@@ -36,6 +38,12 @@ RE::BSEventNotifyControl OutfitLockManager::ProcessEvent(
     RE::BSTEventSource<RE::TESEquipEvent>*)
 {
     if (!a_event) {
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
+    // Assigning an outfit makes the engine queue an UnequipAll, so the events that
+    // arrive just after are our own doing, not the player's.
+    if (OutfitFormBackend::GetSingleton()->IsApplying()) {
         return RE::BSEventNotifyControl::kContinue;
     }
 
@@ -279,6 +287,14 @@ bool OutfitLockManager::ApplyOutfit(RE::Actor* actor, const std::string& outfitN
         return false;
     }
 
+    // Restore anything the actor is missing before the loop below gets to it. That
+    // loop prunes items the actor does not have, and the pruning rewrites the stored
+    // outfit - so a SPID reapply, which strips the previous outfit's items out of the
+    // inventory, would otherwise make the lock delete itself one piece at a time.
+    if (outfitName == "locked") {
+        EnsureOutfitItemsInInventory(actor, outfitName);
+    }
+
     OutfitKey key{actor->GetFormID(), outfitName};
     SavedOutfit outfit;
 
@@ -404,7 +420,16 @@ bool OutfitLockManager::Lock(RE::Actor* actor)
     spdlog::info("OutfitLockManager::Lock - Locking actor '{}' (0x{:08X})",
         actor->GetName(), actor->GetFormID());
 
-    return SaveOutfit(actor, "locked");
+    if (!SaveOutfit(actor, "locked")) {
+        return false;
+    }
+
+    // Hand the look to whoever will defend it. SeverActions maintains it through its
+    // own alias if it is installed; the outfit record is what makes SPID stand down.
+    SeverActionsCompat::HandOffOutfit(actor);
+    PromoteLockToOutfitForm(actor);
+
+    return true;
 }
 
 bool OutfitLockManager::Unlock(RE::Actor* actor)
@@ -417,12 +442,27 @@ bool OutfitLockManager::Unlock(RE::Actor* actor)
     spdlog::info("OutfitLockManager::Unlock - Unlocking actor '{}' (0x{:08X})",
         actor->GetName(), actor->GetFormID());
 
+    // Give the NPC back to whoever had them: restoring the original outfit is what
+    // lets SPID resume distributing to this actor.
+    SeverActionsCompat::ReleaseOutfit(actor);
+    OutfitFormBackend::GetSingleton()->Restore(actor);
+
     return DeleteOutfit(actor, "locked");
 }
 
 bool OutfitLockManager::IsLocked(RE::Actor* actor) const
 {
     return HasOutfit(actor, "locked");
+}
+
+void OutfitLockManager::PromoteLockToOutfitForm(RE::Actor* actor)
+{
+    if (!actor) return;
+
+    auto* backend = OutfitFormBackend::GetSingleton();
+    if (!backend->IsAvailable()) return;
+
+    backend->Apply(actor, GetOutfitItemFormKeys(actor, "locked"));
 }
 
 void OutfitLockManager::MarkItemAsPlayerGiven(RE::Actor* actor, RE::FormID itemID)
@@ -909,6 +949,10 @@ void OutfitLockManager::OnPostLoadGame()
 {
     spdlog::info("OutfitLockManager::OnPostLoadGame - Scanning for locked NPCs");
 
+    // Outfit records carry their item list in memory only, so every one of them comes
+    // back from a load empty. Rebuild before anything reads them.
+    OutfitFormBackend::GetSingleton()->ReapplyAll();
+
     // On post load game, try to get player's current location
     auto* player = RE::PlayerCharacter::GetSingleton();
     RE::BGSLocation* playerLoc = nullptr;
@@ -970,7 +1014,12 @@ void OutfitLockManager::ApplyLockedOutfitsInLocation(RE::BGSLocation* location)
 
     // Apply outfits outside the lock to avoid deadlock
     for (auto* actor : actorsToProcess) {
+        // Under SeverActions the unequip half of this would trip its alias debounce
+        // and have it re-dress the NPC on top of us. Its own apply path brackets
+        // itself the same way.
+        SeverActionsCompat::SuspendLock(actor);
         ApplyOutfit(actor, "locked", true);
+        SeverActionsCompat::ResumeLock(actor);
     }
 }
 

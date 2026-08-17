@@ -7,6 +7,7 @@
 #include <functional>
 #include "log.h"
 #include "dressup/OutfitLockManager.h"
+#include "dressup/OutfitFormBackend.h"
 #include "dressup/DressupTransaction.h"
 #include "dressup/ItemEquipHelper.h"
 #include "dressup/UndressManager.h"
@@ -70,6 +71,13 @@ public:
         RE::BSTEventSource<RE::TESEquipEvent>*) override
     {
         if (!a_event || m_processingReturn || a_event->equipped) {
+            return RE::BSEventNotifyControl::kContinue;
+        }
+
+        // An outfit assignment makes the engine queue an UnequipAll. Those unequips are
+        // ours, not the NPC shedding gear, and acting on them would hand the player's
+        // items back mid-dress.
+        if (OutfitFormBackend::GetSingleton()->IsApplying()) {
             return RE::BSEventNotifyControl::kContinue;
         }
 

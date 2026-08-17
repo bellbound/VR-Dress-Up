@@ -4,6 +4,9 @@ set(sources ${sources}
     src/MenuChecker.cpp
     src/higgsinterface001.cpp
     src/dressup/OutfitLockManager.cpp
+    src/dressup/OutfitFormBackend.cpp
+    src/dressup/SeverActionsCompat.cpp
+    src/dressup/PapyrusBridge.cpp
     src/dressup/FormKeyUtil.cpp
     src/api/ThreeDUIInterface001.cpp
     src/api/ThreeDUIActorMenu.cpp

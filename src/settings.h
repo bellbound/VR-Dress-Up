@@ -28,11 +28,22 @@ public:
         // [General] section
         m_enableModGallery = GetPrivateProfileIntA("General", "bEnableModGallery", 0, m_iniPath.c_str()) != 0;
 
+        // [Outfit] section
+        m_useOutfitBackend = GetPrivateProfileIntA("Outfit", "bUseOutfitBackend", 1, m_iniPath.c_str()) != 0;
+        m_outfitBackendUniqueOnly = GetPrivateProfileIntA("Outfit", "bOutfitBackendUniqueOnly", 1, m_iniPath.c_str()) != 0;
+        m_severActionsCompat = GetPrivateProfileIntA("Outfit", "bSeverActionsCompat", 1, m_iniPath.c_str()) != 0;
+
         spdlog::info("Settings: bEnableModGallery = {}", m_enableModGallery);
+        spdlog::info("Settings: bUseOutfitBackend = {}", m_useOutfitBackend);
+        spdlog::info("Settings: bOutfitBackendUniqueOnly = {}", m_outfitBackendUniqueOnly);
+        spdlog::info("Settings: bSeverActionsCompat = {}", m_severActionsCompat);
     }
 
     // Accessors
     bool IsModGalleryEnabled() const { return m_enableModGallery; }
+    bool IsOutfitBackendEnabled() const { return m_useOutfitBackend; }
+    bool IsOutfitBackendUniqueOnly() const { return m_outfitBackendUniqueOnly; }
+    bool IsSeverActionsCompatEnabled() const { return m_severActionsCompat; }
 
 private:
     Settings() = default;
@@ -44,4 +55,9 @@ private:
 
     // [General]
     bool m_enableModGallery = false;  // Default: disabled
+
+    // [Outfit]
+    bool m_useOutfitBackend = true;         // Assign a real Outfit form on lock (SPID handoff)
+    bool m_outfitBackendUniqueOnly = true;  // Skip NPCs whose base record is shared between copies
+    bool m_severActionsCompat = true;       // Hand locked outfits to SeverActions when installed
 };
