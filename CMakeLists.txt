@@ -36,6 +36,7 @@ endif()
 # Setup your SKSE plugin as an SKSE plugin!
 find_package(CommonLibSSE CONFIG REQUIRED)
 find_package(directxtk CONFIG REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 include(cmake/headerlist.cmake)
 include(cmake/sourcelist.cmake)
 add_commonlibsse_plugin(${PROJECT_NAME} SOURCES ${headers} ${sources})
@@ -48,6 +49,12 @@ target_include_directories(
 	PRIVATE
 		${SIMPLEINI_INCLUDE_DIRS}
 		${CMAKE_SOURCE_DIR}/external
+)
+
+target_link_libraries(
+	"${PROJECT_NAME}"
+	PRIVATE
+		nlohmann_json::nlohmann_json
 )
 
 # Generate PDB in Release builds

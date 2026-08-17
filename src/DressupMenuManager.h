@@ -10,6 +10,7 @@
 #include "dressup/UndressManager.h"
 #include "dressup/ArmorModManager.h"
 #include "dressup/GalleryStateManager.h"
+#include "dressup/KeywordCategoryManager.h"
 #include "dressup/ItemEquipHelper.h"
 #include "openvr.h"
 #include "InputManager.h"
@@ -27,6 +28,14 @@ inline std::wstring ToWide(const char* str) {
 inline std::wstring ToWide(const std::string& str) {
     return ToWide(str.c_str());
 }
+
+// What the shared row below the wheel is currently showing. Only one at a time.
+enum class GalleryMode : std::uint8_t
+{
+    None = 0,
+    Mods,       // one entry per installed mod
+    Keywords    // one entry per keyword category ("Boots", "Wigs", ...)
+};
 
 class DressupMenuManager
 {
@@ -282,10 +291,14 @@ private:
                 ShowHoverInfoText(L"Browse all Armors of the Game");
                 return true;
             }
+            if (id == "keyword_toggle") {
+                ShowHoverInfoText(L"Browse by kind of item - boots, wigs, capes - across every mod");
+                return true;
+            }
         }
 
         if (event->type == P3DUI::EventType::HoverExit) {
-            if (id == "lock_button" || id == "gallery_toggle") {
+            if (id == "lock_button" || id == "gallery_toggle" || id == "keyword_toggle") {
                 ClearHoverInfoText();
                 return true;
             }
@@ -330,7 +343,13 @@ private:
                 return true;
             }
 
-            // Category selection (category_0, category_1, etc.)
+            // Keyword category gallery toggle button
+            if (id == "keyword_toggle") {
+                OnKeywordGalleryToggleClicked();
+                return true;
+            }
+
+            // Mod selection (category_0, category_1, etc.)
             if (id.rfind("category_", 0) == 0) {
                 try {
                     int categoryIndex = std::stoi(id.substr(9));
@@ -338,6 +357,17 @@ private:
                     return true;
                 } catch (...) {
                     spdlog::warn("DressupMenuManager: Invalid category ID: {}", id);
+                }
+            }
+
+            // Keyword category selection (kwcat_0, kwcat_1, etc.)
+            if (id.rfind("kwcat_", 0) == 0) {
+                try {
+                    int categoryIndex = std::stoi(id.substr(6));
+                    OnKeywordCategorySelected(categoryIndex);
+                    return true;
+                } catch (...) {
+                    spdlog::warn("DressupMenuManager: Invalid keyword category ID: {}", id);
                 }
             }
 
@@ -456,12 +486,12 @@ private:
 
         // Gallery toggle button (only shown if enabled in INI)
         if (Settings::GetSingleton()->IsModGalleryEnabled()) {
-            auto* armorModMgr = ArmorModManager::GetSingleton();
+            bool showingMods = (m_galleryMode == GalleryMode::Mods);
             P3DUI::ElementConfig galleryConfig = P3DUI::ElementConfig::Default("gallery_toggle");
-            galleryConfig.texturePath = m_galleryVisible
+            galleryConfig.texturePath = showingMods
                 ? "textures\\VRDressup\\gallery_highlight.dds"
                 : "textures\\VRDressup\\gallery.dds";
-            galleryConfig.tooltip = m_galleryVisible ? L"Close Gallery" : L"Mod Gallery";
+            galleryConfig.tooltip = showingMods ? L"Close Gallery" : L"Mod Gallery";
             galleryConfig.scale = 1.2f;
             galleryConfig.facingMode = P3DUI::FacingMode::None;
 
@@ -471,8 +501,25 @@ private:
             }
         }
 
-        spdlog::info("PopulateHandleRow: isLocked={}, hasPlayerItems={}, galleryVisible={}",
-            isLocked, invMgr->HasPlayerItems(), m_galleryVisible);
+        // Keyword category gallery toggle button (only shown if enabled in INI)
+        if (Settings::GetSingleton()->IsCategoryGalleryEnabled()) {
+            bool showingKeywords = (m_galleryMode == GalleryMode::Keywords);
+            P3DUI::ElementConfig keywordConfig = P3DUI::ElementConfig::Default("keyword_toggle");
+            keywordConfig.texturePath = showingKeywords
+                ? "textures\\VRDressup\\clothes_highlight.dds"
+                : "textures\\VRDressup\\clothes.dds";
+            keywordConfig.tooltip = showingKeywords ? L"Close Categories" : L"Browse by Category";
+            keywordConfig.scale = 1.2f;
+            keywordConfig.facingMode = P3DUI::FacingMode::None;
+
+            auto* keywordButton = m_api->CreateElement(keywordConfig);
+            if (keywordButton) {
+                m_handleRow->AddChild(keywordButton);
+            }
+        }
+
+        spdlog::info("PopulateHandleRow: isLocked={}, hasPlayerItems={}, galleryMode={}",
+            isLocked, invMgr->HasPlayerItems(), static_cast<int>(m_galleryMode));
     }
 
     // Refresh item spiral based on current inventory source, filter mode, or active mod category
@@ -495,9 +542,9 @@ private:
             m_itemSpiral->AddChild(anchorHandle);
         }
 
-        // If a mod category is selected, show mod items instead of inventory
-        if (!m_activeModCategory.empty()) {
-            RefreshItemSpiralWithModArmor();
+        // If a gallery category is selected, show its items instead of the inventory
+        if (IsShowingGalleryItems()) {
+            RefreshItemSpiralWithGalleryArmor();
             return;
         }
 
@@ -538,14 +585,15 @@ private:
         spdlog::info("DressupMenuManager::RefreshItemSpiral - Refreshed with {} items + anchor handle", m_currentItemList.size());
     }
 
-    // Refresh item spiral with armor from the active mod category
-    void RefreshItemSpiralWithModArmor()
+    // Refresh item spiral with armor from the active gallery category (mod or keyword)
+    void RefreshItemSpiralWithGalleryArmor()
     {
-        // Load armor for the selected mod (lazy load)
-        m_currentModArmorList = ArmorModManager::GetSingleton()->LoadArmorForMod(m_activeModCategory);
+        m_galleryArmorList = !m_activeModCategory.empty()
+            ? ArmorModManager::GetSingleton()->GetArmorForMod(m_activeModCategory)
+            : KeywordCategoryManager::GetSingleton()->GetItemsForCategory(m_activeKeywordCategory);
 
         // Sort alphabetically by name (gallery mode only - inventory uses game order)
-        std::sort(m_currentModArmorList.begin(), m_currentModArmorList.end(),
+        std::sort(m_galleryArmorList.begin(), m_galleryArmorList.end(),
             [](RE::TESObjectARMO* a, RE::TESObjectARMO* b) {
                 const char* nameA = a ? a->GetFullName() : "";
                 const char* nameB = b ? b->GetFullName() : "";
@@ -553,8 +601,8 @@ private:
             });
 
         // Add armor items to spiral
-        for (size_t i = 0; i < m_currentModArmorList.size(); ++i) {
-            auto* armor = m_currentModArmorList[i];
+        for (size_t i = 0; i < m_galleryArmorList.size(); ++i) {
+            auto* armor = m_galleryArmorList[i];
             if (!armor) continue;
 
             std::string itemId = "item_" + std::to_string(i);
@@ -574,8 +622,9 @@ private:
             }
         }
 
-        spdlog::info("DressupMenuManager::RefreshItemSpiralWithModArmor - Showing {} items from mod '{}'",
-            m_currentModArmorList.size(), m_activeModCategory);
+        spdlog::info("DressupMenuManager::RefreshItemSpiralWithGalleryArmor - Showing {} items from '{}'",
+            m_galleryArmorList.size(),
+            m_activeModCategory.empty() ? m_activeKeywordCategory : m_activeModCategory);
     }
 
     // Callback: Toggle between player and NPC inventory source
@@ -678,90 +727,112 @@ private:
         PopulateHandleRow();
     }
 
-    // Callback: Gallery toggle button clicked
+    // Callback: Mod gallery toggle button clicked
     void OnGalleryToggleClicked()
     {
-        m_galleryVisible = !m_galleryVisible;
+        SetGalleryMode(m_galleryMode == GalleryMode::Mods ? GalleryMode::None : GalleryMode::Mods);
+    }
 
-        spdlog::info("DressupMenuManager::OnGalleryToggleClicked - Gallery is now {}",
-            m_galleryVisible ? "visible" : "hidden");
+    // Callback: Keyword category gallery toggle button clicked
+    void OnKeywordGalleryToggleClicked()
+    {
+        SetGalleryMode(m_galleryMode == GalleryMode::Keywords ? GalleryMode::None : GalleryMode::Keywords);
+    }
 
-        if (m_galleryVisible) {
-            auto* armorModMgr = ArmorModManager::GetSingleton();
-            auto loadState = armorModMgr->GetLoadState();
-
-            if (loadState == CacheLoadState::NotStarted || loadState == CacheLoadState::Failed) {
-                // Start async cache build - will callback when done
-                spdlog::info("DressupMenuManager: Starting async armor mod cache build...");
-                m_galleryLoading = true;
-
-                armorModMgr->StartCacheBuildAsync([this](bool success) {
-                    // This callback runs on main thread when cache is complete
-                    m_galleryLoading = false;
-
-                    // Must verify menu is still open - m_galleryRow can be invalid if menu closed
-                    if (success && m_galleryVisible && IsMenuOpen()) {
-                        spdlog::info("DressupMenuManager: Cache build complete, refreshing gallery");
-                        RefreshGalleryRow();
-                        PopulateHandleRow();  // Update button to remove loading state
-                    } else if (!success) {
-                        spdlog::error("DressupMenuManager: Cache build failed");
-                    }
-                });
-
-                // Show gallery row with loading indicator
-                if (m_galleryRow) {
-                    m_galleryRow->SetVisible(true);
-                }
-                RefreshGalleryRow();  // Will show loading state
-            } else if (loadState == CacheLoadState::Complete) {
-                // Cache already built - show immediately
-                RefreshGalleryRow();
-                if (m_galleryRow) {
-                    m_galleryRow->SetVisible(true);
-                }
-            } else {
-                // Cache is loading - just show loading state
-                m_galleryLoading = true;
-                if (m_galleryRow) {
-                    m_galleryRow->SetVisible(true);
-                }
-                RefreshGalleryRow();
-            }
-        } else {
-            // Hide gallery - clear active category and return to inventory view
-            m_activeModCategory.clear();
-            m_currentModArmorList.clear();
-            m_galleryLoading = false;
-            if (m_galleryRow) {
-                m_galleryRow->SetVisible(false);
-            }
-            // Refresh spiral to show inventory again
-            RefreshItemSpiral();
+    // Both galleries share one row below the wheel, so opening one closes the other.
+    void SetGalleryMode(GalleryMode mode)
+    {
+        // The keyword categories are read from disk the first time they are asked for.
+        if (mode == GalleryMode::Keywords && !KeywordCategoryManager::GetSingleton()->LoadDefinitions()) {
+            RE::DebugNotification("Dress Up VR: no item categories installed");
+            return;
         }
 
-        // Update handle row to show correct gallery button state
-        PopulateHandleRow();
+        spdlog::info("DressupMenuManager::SetGalleryMode - {} -> {}",
+            static_cast<int>(m_galleryMode), static_cast<int>(mode));
 
-        // Update info text position and content
+        m_galleryMode = mode;
+
+        // Leaving a category always returns the spiral to the inventory view
+        m_activeModCategory.clear();
+        m_activeKeywordCategory.clear();
+        m_galleryArmorList.clear();
+        m_categoryList.clear();
+        m_keywordCategoryList.clear();
+        m_galleryLoading = false;
+
+        if (mode == GalleryMode::None) {
+            if (m_galleryRow) {
+                m_galleryRow->Clear();
+                m_galleryRow->SetVisible(false);
+            }
+        } else {
+            if (m_galleryRow) {
+                m_galleryRow->SetVisible(true);
+            }
+
+            // Both galleries read the same armor scan; kick it off if it hasn't run yet.
+            if (mode == GalleryMode::Mods) {
+                auto* armorModMgr = ArmorModManager::GetSingleton();
+                if (!armorModMgr->IsCacheReady()) {
+                    m_galleryLoading = true;
+                    armorModMgr->StartCacheBuildAsync([this](bool success) {
+                        OnGalleryDataReady(GalleryMode::Mods, success);
+                    });
+                }
+            } else {
+                auto* keywordMgr = KeywordCategoryManager::GetSingleton();
+                if (!keywordMgr->IsReady()) {
+                    m_galleryLoading = true;
+                    keywordMgr->StartBuildAsync([this](bool success) {
+                        OnGalleryDataReady(GalleryMode::Keywords, success);
+                    });
+                }
+            }
+        }
+
+        RefreshGalleryRow();
+        RefreshItemSpiral();
+        PopulateHandleRow();
         UpdateInfoText();
     }
 
-    // Refresh gallery row with mod categories
+    // A background scan finished. The menu may have closed or switched gallery meanwhile.
+    void OnGalleryDataReady(GalleryMode mode, bool success)
+    {
+        if (m_galleryMode != mode) return;
+
+        m_galleryLoading = false;
+
+        if (!success) {
+            spdlog::error("DressupMenuManager::OnGalleryDataReady - Build failed for gallery mode {}",
+                static_cast<int>(mode));
+        }
+
+        // Must verify menu is still open - the row elements can be invalid if it closed
+        if (!IsMenuOpen()) return;
+
+        RefreshGalleryRow();
+        PopulateHandleRow();  // Update button to remove loading state
+    }
+
+    // Refresh gallery row with whatever the current mode shows
     void RefreshGalleryRow()
     {
         // Bail out if menu is closed - UI elements may be invalid
-        if (!IsMenuOpen() || !m_galleryRow || !m_api) return;
+        if (!IsMenuOpen() || !m_galleryRow || !m_api || m_galleryMode == GalleryMode::None) return;
 
         m_galleryRow->Clear();
 
-        auto* armorModMgr = ArmorModManager::GetSingleton();
+        bool showingMods = (m_galleryMode == GalleryMode::Mods);
 
-        // If cache is still loading, show a loading indicator
-        if (!armorModMgr->IsCacheReady()) {
+        // If the underlying scan is still running, show a loading indicator
+        if (m_galleryLoading) {
             P3DUI::ElementConfig loadingConfig = P3DUI::ElementConfig::Default("loading_indicator");
-            loadingConfig.texturePath = "textures\\VRDressup\\gallery.dds";
-            loadingConfig.tooltip = L"Loading mods...";
+            loadingConfig.texturePath = showingMods
+                ? "textures\\VRDressup\\gallery.dds"
+                : "textures\\VRDressup\\clothes.dds";
+            loadingConfig.tooltip = showingMods ? L"Loading mods..." : L"Loading categories...";
             loadingConfig.scale = 1.2f;
             loadingConfig.facingMode = P3DUI::FacingMode::None;
 
@@ -770,10 +841,28 @@ private:
                 m_galleryRow->AddChild(loadingElement);
             }
 
+            float progress = showingMods
+                ? ArmorModManager::GetSingleton()->GetLoadProgress()
+                : KeywordCategoryManager::GetSingleton()->GetProgress();
             spdlog::info("DressupMenuManager::RefreshGalleryRow - Showing loading indicator (progress: {:.0f}%)",
-                armorModMgr->GetLoadProgress() * 100.0f);
+                progress * 100.0f);
             return;
         }
+
+        if (showingMods) {
+            PopulateModCategories();
+        } else {
+            PopulateKeywordCategories();
+        }
+
+        // Reset scroll position to show the first entries
+        m_galleryRow->ResetScroll();
+    }
+
+    // Fill the gallery row with one entry per installed mod
+    void PopulateModCategories()
+    {
+        auto* armorModMgr = ArmorModManager::GetSingleton();
 
         // Get sorted categories from ArmorModManager
         m_categoryList = armorModMgr->GetSortedCategories();
@@ -825,10 +914,64 @@ private:
             }
         }
 
-        // Reset scroll position to show front categories (user's recently interacted mods)
-        m_galleryRow->ResetScroll();
+        spdlog::info("DressupMenuManager::PopulateModCategories - Populated with {} mods", m_categoryList.size());
+    }
 
-        spdlog::info("DressupMenuManager::RefreshGalleryRow - Populated with {} categories", m_categoryList.size());
+    // Fill the gallery row with one entry per keyword category
+    void PopulateKeywordCategories()
+    {
+        m_keywordCategoryList = KeywordCategoryManager::GetSingleton()->GetSortedCategories();
+
+        for (size_t i = 0; i < m_keywordCategoryList.size(); ++i) {
+            const auto& category = m_keywordCategoryList[i];
+
+            std::string categoryId = "kwcat_" + std::to_string(i);
+
+            std::wstring tooltip = ToWide(category.name) + L" (" + std::to_wstring(category.itemCount) + L")";
+
+            P3DUI::ElementConfig catConfig = P3DUI::ElementConfig::Default(categoryId.c_str());
+            catConfig.tooltip = tooltip.c_str();
+            catConfig.scale = 1.0f;
+
+            // Preview the category with one of its own items
+            // Store model path in local variable to ensure pointer validity until CreateElement
+            std::string modelPath;
+            if (category.representative) {
+                catConfig.formID = category.representative->GetFormID();
+                modelPath = ItemEquipHelper::GetModelPath(category.representative);
+                catConfig.modelPath = modelPath.c_str();
+            }
+
+            auto* catElement = m_api->CreateElement(catConfig);
+            if (catElement) {
+                // Add background sphere for visual highlight
+                catElement->SetBackgroundModel("meshes\\3DUI\\cloud-background-sphere.nif");
+                catElement->SetBackgroundScale(20.0f);
+                m_galleryRow->AddChild(catElement);
+            }
+        }
+
+        spdlog::info("DressupMenuManager::PopulateKeywordCategories - Populated with {} categories",
+            m_keywordCategoryList.size());
+    }
+
+    // Callback: Keyword category selected in gallery
+    void OnKeywordCategorySelected(int categoryIndex)
+    {
+        if (categoryIndex < 0 || categoryIndex >= static_cast<int>(m_keywordCategoryList.size())) {
+            spdlog::warn("DressupMenuManager::OnKeywordCategorySelected - Invalid index: {}", categoryIndex);
+            return;
+        }
+
+        const auto& category = m_keywordCategoryList[categoryIndex];
+        m_activeModCategory.clear();
+        m_activeKeywordCategory = category.name;
+
+        spdlog::info("DressupMenuManager::OnKeywordCategorySelected - Selected '{}' ({} items)",
+            category.name, category.itemCount);
+
+        RefreshItemSpiral();
+        UpdateInfoText();
     }
 
     // Callback: Category selected in gallery
@@ -840,6 +983,7 @@ private:
         }
 
         const auto& category = m_categoryList[categoryIndex];
+        m_activeKeywordCategory.clear();
         m_activeModCategory = category.modName;
 
         spdlog::info("DressupMenuManager::OnCategorySelected - Selected mod '{}' ({} items)",
@@ -873,12 +1017,14 @@ public:
         m_currentItemList.clear();
 
         // Clear gallery state
-        m_galleryVisible = false;
+        m_galleryMode = GalleryMode::None;
         m_galleryLoading = false;
         m_showingHoverText = false;
         m_activeModCategory.clear();
-        m_currentModArmorList.clear();
+        m_activeKeywordCategory.clear();
+        m_galleryArmorList.clear();
         m_categoryList.clear();
+        m_keywordCategoryList.clear();
         if (m_galleryRow) {
             m_galleryRow->SetVisible(false);
         }
@@ -914,7 +1060,7 @@ private:
     DressupMenuManager& operator=(const DressupMenuManager&) = delete;
 
     // Update info text based on current context
-    // Shows: mod name when viewing mod, "Your Inventory" when player mode, nothing when NPC mode
+    // Shows: category name when viewing one, "Your Inventory" when player mode, nothing when NPC mode
     void UpdateInfoText()
     {
         if (!m_infoText) return;
@@ -923,13 +1069,14 @@ private:
         if (m_showingHoverText) return;
 
         // Determine position based on gallery visibility
-        float zPos = m_galleryVisible ? -28.0f : -18.0f;
+        float zPos = IsGalleryVisible() ? -28.0f : -18.0f;
         m_infoText->SetLocalPosition(0, 0, zPos);
 
         // Determine what text to show
-        if (!m_activeModCategory.empty()) {
-            // Viewing a mod category - show mod name
-            m_infoText->SetText(ToWide(m_activeModCategory).c_str());
+        if (IsShowingGalleryItems()) {
+            // Viewing a mod or keyword category - show its name
+            const std::string& label = m_activeModCategory.empty() ? m_activeKeywordCategory : m_activeModCategory;
+            m_infoText->SetText(ToWide(label).c_str());
             m_infoText->SetVisible(true);
         } else if (InventoryManager::GetSingleton()->IsTargetPlayer()) {
             // Player inventory mode
@@ -950,7 +1097,7 @@ private:
         m_showingHoverText = true;
 
         // Update position based on gallery visibility
-        float zPos = m_galleryVisible ? -28.0f : -18.0f;
+        float zPos = IsGalleryVisible() ? -28.0f : -18.0f;
         m_infoText->SetLocalPosition(0, 0, zPos);
 
         m_infoText->SetText(text);
@@ -970,10 +1117,10 @@ private:
         auto* invMgr = InventoryManager::GetSingleton();
         bool wasLocked = invMgr->IsNpcLocked();
 
-        // If viewing mod category, equip mod armor
-        if (!m_activeModCategory.empty()) {
-            if (itemIndex < 0 || itemIndex >= static_cast<int>(m_currentModArmorList.size())) {
-                spdlog::warn("DressupMenuManager::OnItemSelected - Invalid mod armor index: {}", itemIndex);
+        // If viewing a gallery category, equip from it
+        if (IsShowingGalleryItems()) {
+            if (itemIndex < 0 || itemIndex >= static_cast<int>(m_galleryArmorList.size())) {
+                spdlog::warn("DressupMenuManager::OnItemSelected - Invalid gallery armor index: {}", itemIndex);
                 return;
             }
 
@@ -981,10 +1128,10 @@ private:
             RE::Actor* targetActor = invMgr->GetTargetActor();
             bool hadUndressState = targetActor && UndressManager::GetSingleton()->HasUndressState(targetActor);
 
-            auto* armor = m_currentModArmorList[itemIndex];
+            auto* armor = m_galleryArmorList[itemIndex];
             if (armor) {
                 invMgr->EquipFromMod(armor);
-                spdlog::info("DressupMenuManager::OnItemSelected - Equipped mod armor '{}'", armor->GetFullName());
+                spdlog::info("DressupMenuManager::OnItemSelected - Equipped gallery armor '{}'", armor->GetFullName());
             }
 
             // Refresh handle row if lock state or undress state changed
@@ -1042,11 +1189,21 @@ private:
     bool m_initialPlacementComplete = false;  // Prevents repositioning after initial placement
     std::vector<DressupInventoryItem> m_currentItemList;
 
-    // Gallery mode state
-    bool m_galleryVisible = false;                       // Whether gallery row is visible
-    bool m_galleryLoading = false;                       // Whether gallery cache is being built
+    // Gallery state - the mod gallery and the keyword categories share one row
+    GalleryMode m_galleryMode = GalleryMode::None;       // What the gallery row is showing
+    bool m_galleryLoading = false;                       // Whether the backing scan is still running
     bool m_showingHoverText = false;                     // Whether info text shows hover description
-    std::string m_activeModCategory;                     // Currently selected mod category (empty = none)
-    std::vector<RE::TESObjectARMO*> m_currentModArmorList;  // Loaded armor for selected category
-    std::vector<ModCategoryInfo> m_categoryList;         // Current list of categories in gallery
+    std::string m_activeModCategory;                     // Selected mod (empty = none)
+    std::string m_activeKeywordCategory;                 // Selected keyword category (empty = none)
+    std::vector<RE::TESObjectARMO*> m_galleryArmorList;  // Items shown for the selected category
+    std::vector<ModCategoryInfo> m_categoryList;         // Mods currently in the gallery row
+    std::vector<KeywordCategoryInfo> m_keywordCategoryList;  // Keyword categories currently in the gallery row
+
+    bool IsGalleryVisible() const { return m_galleryMode != GalleryMode::None; }
+
+    // True while the spiral shows a category's items rather than an inventory
+    bool IsShowingGalleryItems() const
+    {
+        return !m_activeModCategory.empty() || !m_activeKeywordCategory.empty();
+    }
 };

@@ -7,12 +7,14 @@ How it Works
 
 Grab any NPC with your VR controller and press trigger to open the Dress Up menu. A 3D wheel appears showing everything they are wearing. Press trigger on any item to remove it. Release trigger to anchor the menu in place while you browse.
 
-Toggle to your own inventory to give items to the NPC. Toggle to the Gallery to browse armor from all your installed mods organized by plugin.
+Toggle to your own inventory to give items to the NPC. Toggle to the Gallery to browse armor from all your installed mods organized by plugin, or to Categories to browse it by kind of item instead - boots, wigs, capes, gloves - pooled from every mod at once.
 
 Core Features
   ✦ Intuitive 3D menu for browsing and equipping armor and weapons
   ✦ Browse your own inventory and transfer items to NPCs
   ✦ Gallery mode lets you browse armor from every mod you have installed
+  ✦ Category mode gathers every mod's boots, wigs, capes and more into one row
+  ✦ Categories are plain JSON files, so you can retune them or add your own
   ✦ Lock outfits so NPCs maintain their look across location changes and saves
   ✦ Quick undress button with partial and full options
   ✦ Restore original outfit at any time

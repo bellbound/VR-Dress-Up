@@ -27,6 +27,7 @@ public:
 
         // [General] section
         m_enableModGallery = GetPrivateProfileIntA("General", "bEnableModGallery", 0, m_iniPath.c_str()) != 0;
+        m_enableCategoryGallery = GetPrivateProfileIntA("General", "bEnableCategoryGallery", 1, m_iniPath.c_str()) != 0;
 
         // [Outfit] section
         m_useOutfitBackend = GetPrivateProfileIntA("Outfit", "bUseOutfitBackend", 1, m_iniPath.c_str()) != 0;
@@ -34,6 +35,7 @@ public:
         m_severActionsCompat = GetPrivateProfileIntA("Outfit", "bSeverActionsCompat", 1, m_iniPath.c_str()) != 0;
 
         spdlog::info("Settings: bEnableModGallery = {}", m_enableModGallery);
+        spdlog::info("Settings: bEnableCategoryGallery = {}", m_enableCategoryGallery);
         spdlog::info("Settings: bUseOutfitBackend = {}", m_useOutfitBackend);
         spdlog::info("Settings: bOutfitBackendUniqueOnly = {}", m_outfitBackendUniqueOnly);
         spdlog::info("Settings: bSeverActionsCompat = {}", m_severActionsCompat);
@@ -41,6 +43,7 @@ public:
 
     // Accessors
     bool IsModGalleryEnabled() const { return m_enableModGallery; }
+    bool IsCategoryGalleryEnabled() const { return m_enableCategoryGallery; }
     bool IsOutfitBackendEnabled() const { return m_useOutfitBackend; }
     bool IsOutfitBackendUniqueOnly() const { return m_outfitBackendUniqueOnly; }
     bool IsSeverActionsCompatEnabled() const { return m_severActionsCompat; }
@@ -54,10 +57,11 @@ private:
     std::string m_iniPath;
 
     // [General]
-    bool m_enableModGallery = false;  // Default: disabled
+    bool m_enableModGallery = false;      // Default: disabled
+    bool m_enableCategoryGallery = true;  // Browse by item kind (boots, wigs, ...) across all mods
 
     // [Outfit]
     bool m_useOutfitBackend = true;         // Assign a real Outfit form on lock (SPID handoff)
     bool m_outfitBackendUniqueOnly = true;  // Skip NPCs whose base record is shared between copies
-    bool m_severActionsCompat = true;       // Hand locked outfits to SeverActions when installed
+    bool m_severActionsCompat = true;       // Exclude locked NPCs from the SeverActions outfit system
 };

@@ -8,6 +8,7 @@ set(sources ${sources}
     src/dressup/SeverActionsCompat.cpp
     src/dressup/PapyrusBridge.cpp
     src/dressup/FormKeyUtil.cpp
+    src/dressup/KeywordCategoryManager.cpp
     src/api/ThreeDUIInterface001.cpp
     src/api/ThreeDUIActorMenu.cpp
     src/api/DressUpInterface001.cpp

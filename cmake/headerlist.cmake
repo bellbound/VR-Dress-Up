@@ -13,8 +13,12 @@ set(headers ${headers}
     src/NpcUtils.h
     src/SpellWheelInterface.h
     src/api/ThreeDUIInterface001.h
+    src/dressup/ArmorModManager.h
     src/dressup/DressupTransaction.h
+    src/dressup/GalleryStateManager.h
     src/dressup/ItemEquipHelper.h
+    src/dressup/KeywordCategoryManager.h
+    src/dressup/UndressManager.h
     src/dressup/OutfitLockManager.h
     src/dressup/OutfitFormBackend.h
     src/dressup/SeverActionsCompat.h

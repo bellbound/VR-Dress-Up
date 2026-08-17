@@ -11,7 +11,7 @@
 #include <atomic>
 #include <mutex>
 #include "GalleryStateManager.h"
-#include "log.h"
+#include "../log.h"
 
 // Cached mod category info (lightweight, built at startup)
 struct ModCategoryInfo
@@ -53,7 +53,8 @@ public:
 
     // Start async cache building (call on first gallery open)
     // Returns immediately, cache builds over multiple frames
-    // Callback is called on completion (on main thread)
+    // Callback is called on completion (on main thread). Several callers may wait on the
+    // same build - each one's callback fires.
     void StartCacheBuildAsync(CacheCompleteCallback callback = nullptr)
     {
         bool alreadyComplete = false;
@@ -61,13 +62,16 @@ public:
         {
             std::lock_guard<std::mutex> lock(m_mutex);
 
-            if (m_loadState != CacheLoadState::NotStarted && m_loadState != CacheLoadState::Failed) {
-                spdlog::warn("ArmorModManager: Cache build already in progress or complete");
-                alreadyComplete = (m_loadState == CacheLoadState::Complete);
+            if (m_loadState == CacheLoadState::Complete) {
+                alreadyComplete = true;
+            } else if (m_loadState != CacheLoadState::NotStarted && m_loadState != CacheLoadState::Failed) {
+                // Build already running - ride along with it
+                if (callback) m_completionCallbacks.push_back(std::move(callback));
+                return;
             } else {
                 spdlog::info("ArmorModManager: Starting async category cache build...");
 
-                m_completionCallback = callback;
+                if (callback) m_completionCallbacks.push_back(std::move(callback));
                 m_categoryCache.clear();
                 m_armorByMod.clear();
                 m_npcModCache.clear();
@@ -184,6 +188,29 @@ public:
         return GetArmorForMod(modName);
     }
 
+    // Every deduplicated armor in the cache, regardless of source mod.
+    // Used by the keyword categories so the form array is only ever scanned once.
+    std::vector<RE::TESObjectARMO*> GetAllCachedArmor() const
+    {
+        if (!IsCacheReady()) {
+            return {};
+        }
+
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        size_t total = 0;
+        for (const auto& [modName, armors] : m_armorByMod) {
+            total += armors.size();
+        }
+
+        std::vector<RE::TESObjectARMO*> result;
+        result.reserve(total);
+        for (const auto& [modName, armors] : m_armorByMod) {
+            result.insert(result.end(), armors.begin(), armors.end());
+        }
+        return result;
+    }
+
     // Get category count (for UI display)
     size_t GetCategoryCount() const
     {
@@ -219,7 +246,15 @@ private:
         if (!dataHandler) {
             spdlog::error("ArmorModManager: Failed to get TESDataHandler");
             m_loadState = CacheLoadState::Failed;
-            if (m_completionCallback) m_completionCallback(false);
+
+            std::vector<CacheCompleteCallback> callbacks;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                callbacks.swap(m_completionCallbacks);
+            }
+            for (auto& callback : callbacks) {
+                if (callback) callback(false);
+            }
             return;
         }
 
@@ -379,7 +414,7 @@ private:
     void ProcessCategoryBatch()
     {
         bool cacheComplete = false;
-        CacheCompleteCallback callbackToInvoke;
+        std::vector<CacheCompleteCallback> callbacksToInvoke;
 
         {
             std::lock_guard<std::mutex> lock(m_mutex);
@@ -424,15 +459,15 @@ private:
                         [](size_t sum, const auto& pair) { return sum + pair.second.size(); }));
 
                 cacheComplete = true;
-                callbackToInvoke = m_completionCallback;
+                callbacksToInvoke.swap(m_completionCallbacks);
             }
         }  // mutex released here
 
         if (cacheComplete) {
-            // Invoke callback AFTER releasing the mutex to avoid deadlock!
-            // The callback may call GetSortedCategories() which needs the mutex.
-            if (callbackToInvoke) {
-                callbackToInvoke(true);
+            // Invoke callbacks AFTER releasing the mutex to avoid deadlock!
+            // A callback may call GetSortedCategories() which needs the mutex.
+            for (auto& callback : callbacksToInvoke) {
+                if (callback) callback(true);
             }
             return;
         }
@@ -562,7 +597,7 @@ private:
     std::atomic<CacheLoadState> m_loadState{CacheLoadState::NotStarted};
     std::atomic<float> m_progressFraction{0.0f};
     size_t m_currentIndex = 0;
-    CacheCompleteCallback m_completionCallback;
+    std::vector<CacheCompleteCallback> m_completionCallbacks;
 
     // Temporary list for category building iteration
     std::vector<std::string> m_modNameList;
