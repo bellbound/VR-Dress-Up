@@ -1,5 +1,6 @@
 #include "KeywordCategoryManager.h"
 #include "ArmorModManager.h"
+#include "ItemEquipHelper.h"
 
 #include <nlohmann/json.hpp>
 
@@ -58,6 +59,13 @@ namespace
         return JoinWords(words);
     }
 
+    // A word ending in "ss" is never a plural, so stripping the s would invent a singular
+    // that was never there - which is how "Brass" used to land in the Bras category.
+    bool IsPluralS(const std::string& w)
+    {
+        return w.size() > 3 && w.back() == 's' && w[w.size() - 2] != 's';
+    }
+
     // Every form of an item's name a keyword could reasonably be written as: each word,
     // each word with a plural ending removed, and each adjacent pair of words.
     void CollectTokens(const std::vector<std::string>& words, std::vector<std::string>& out)
@@ -65,7 +73,7 @@ namespace
         out.clear();
 
         const auto singulars = [&out](const std::string& w) {
-            if (w.size() > 3 && w.back() == 's') out.push_back(w.substr(0, w.size() - 1));
+            if (IsPluralS(w)) out.push_back(w.substr(0, w.size() - 1));
             if (w.size() > 4 && w.ends_with("es")) out.push_back(w.substr(0, w.size() - 2));
         };
 
@@ -76,7 +84,7 @@ namespace
             if (i + 1 < words.size()) {
                 const std::string& next = words[i + 1];
                 out.push_back(words[i] + " " + next);
-                if (next.size() > 3 && next.back() == 's') {
+                if (IsPluralS(next)) {
                     out.push_back(words[i] + " " + next.substr(0, next.size() - 1));
                 }
                 if (next.size() > 4 && next.ends_with("es")) {
@@ -180,9 +188,6 @@ namespace
 
         for (auto* armor : items) {
             if (!armor) continue;
-
-            const char* model = armor->worldModels[RE::TESBipedModelForm::Sexes::kMale].GetModel();
-            if (!model || !*model) continue;
 
             const char* name = armor->GetFullName();
             if (!name || !*name) continue;
@@ -468,8 +473,23 @@ void KeywordCategoryManager::FinishMatching()
         std::lock_guard<std::mutex> lock(m_mutex);
 
         for (size_t i = 0; i < m_buckets.size(); ++i) {
-            m_buckets[i].representative = PickRepresentative(m_buckets[i].items);
-            spdlog::trace("KeywordCategoryManager: [{}] {} items", m_defs[i].name, m_buckets[i].items.size());
+            auto& items = m_buckets[i].items;
+
+            // An item with no mesh at all draws nothing and cannot be picked, so it would
+            // only inflate the count shown on the category.
+            const size_t matched = items.size();
+            std::erase_if(items, [](RE::TESObjectARMO* armor) {
+                return ItemEquipHelper::GetModelPath(armor).empty();
+            });
+
+            m_buckets[i].representative = PickRepresentative(items);
+
+            if (items.size() != matched) {
+                spdlog::trace("KeywordCategoryManager: [{}] {} items ({} matched, {} had no mesh)",
+                    m_defs[i].name, items.size(), matched, matched - items.size());
+            } else {
+                spdlog::trace("KeywordCategoryManager: [{}] {} items", m_defs[i].name, items.size());
+            }
         }
 
         m_pendingArmor.clear();

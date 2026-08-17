@@ -128,9 +128,9 @@ public:
             m_handleRow->SetLocalPosition(0, 0, -10.5f);
         }
 
-        // === Create Gallery Row (ColumnGrid for mod categories - horizontal scrolling) ===
+        // === Create Gallery Row (ColumnGrid for mod/keyword categories - horizontal scrolling) ===
         P3DUI::ColumnGridConfig galleryConfig = P3DUI::ColumnGridConfig::Default("gallery_row");
-        galleryConfig.columnSpacing = 15.0f;
+        galleryConfig.columnSpacing = 12.0f;
         galleryConfig.visibleWidth = 40.0f;
         galleryConfig.numRows = 1;
 

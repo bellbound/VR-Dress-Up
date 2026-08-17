@@ -3,7 +3,9 @@
 #include <RE/Skyrim.h>
 #include <vector>
 #include <string>
-#include "log.h"
+// Spelled relative to this file, not to whoever includes it: a .cpp in this folder has no
+// src/ in its include chain, so a bare "log.h" only resolves for includers up in src/.
+#include "../log.h"
 
 // Helper namespace for unified armor/weapon equipment operations
 namespace ItemEquipHelper
@@ -53,11 +55,16 @@ namespace ItemEquipHelper
         return !inventory.empty();
     }
 
-    // Get model path for an item
+    // Get model path for an item. Female-only gear - wigs, lingerie - ships with an empty
+    // male model, and an empty path draws nothing at all in the wheel, so fall back.
     inline std::string GetModelPath(RE::TESObjectARMO* armor)
     {
         if (!armor) return "";
+
         const char* modelPath = armor->worldModels[RE::TESBipedModelForm::Sexes::kMale].GetModel();
+        if (!modelPath || !*modelPath) {
+            modelPath = armor->worldModels[RE::TESBipedModelForm::Sexes::kFemale].GetModel();
+        }
         return modelPath ? modelPath : "";
     }
 
@@ -66,6 +73,23 @@ namespace ItemEquipHelper
         if (!weapon) return "";
         const char* modelPath = weapon->GetModel();
         return modelPath ? modelPath : "";
+    }
+
+    // Biped slot 52 is where The New Gentleman - and SOS before it - puts its genital
+    // addons. Those are body parts rather than clothing: TNG equips and unequips them
+    // itself in reaction to what the NPC is wearing, so anything we do with them is
+    // fighting the mod that owns them. Worse, they turn up worn a frame or two after the
+    // outfit that triggered them, so a snapshot can catch one by accident and then keep
+    // putting it back on long after the player removed it in the TNG menu.
+    //
+    // Verified against the record: TNG_GenitalCover (0xAFF~TheNewGentleman.esp) has
+    // BOD2 = 0x00400000, slot 52 and nothing else.
+    inline bool IsBodyPart(RE::TESObjectARMO* armor)
+    {
+        constexpr auto kBodyPartSlots = static_cast<std::uint32_t>(1u << (52 - 30));
+
+        if (!armor) return false;
+        return (static_cast<std::uint32_t>(armor->GetSlotMask()) & kBodyPartSlots) != 0;
     }
 
     // Check if armor is equipped in its slot
