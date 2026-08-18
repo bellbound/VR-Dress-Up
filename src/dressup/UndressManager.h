@@ -2,10 +2,16 @@
 
 #include <RE/Skyrim.h>
 #include <SKSE/SKSE.h>
-#include <unordered_map>
+#include <algorithm>
+#include <cctype>
 #include <mutex>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <vector>
 #include "OutfitLockManager.h"
 #include "ItemEquipHelper.h"
+#include "DeviceCompat.h"
 
 // State of undress for an NPC
 enum class UndressState : uint8_t
@@ -49,6 +55,96 @@ namespace UndressHelper
     {
         return armor && !IsOuterArmor(armor);
     }
+
+    // Is this a wig?
+    //
+    // A wig is hair rather than clothing, so neither undress takes one off - the NPC
+    // would go bald, which is not what "undress" means. They come off only when the
+    // player picks one in the wheel.
+    //
+    // Slots alone cannot answer this. Slot 31 is the hair slot, but it is also claimed by
+    // most hoods, helmets and hats, because covering the head means hiding the hair:
+    // across the 2427 plugins in this load order, hair-slot items include "Imperial
+    // Helmet", "Mage Hood" and "Colovian Fur Hat". Keeping all of those on would break
+    // undress far worse than stripping a wig does.
+    //
+    // Names alone cannot answer it either: "Lady Ritual Hair Chain" is an accessory worn
+    // on slot 42, and "Spellmonger Robe (Black Hair)" is a full robe that happens to bring
+    // its own hair.
+    //
+    // So both have to agree - the name has to read as hair, and the item has to occupy the
+    // hair slots and nothing that would make it a garment. On this load order that pairing
+    // gets all 413 real wigs and none of the headgear.
+    inline bool IsWig(RE::TESObjectARMO* armor)
+    {
+        if (!armor) return false;
+
+        using Slot = RE::BGSBipedObjectForm::BipedObjectSlot;
+        using SlotType = std::underlying_type_t<Slot>;
+
+        constexpr SlotType hairSlots =
+            static_cast<SlotType>(Slot::kHair) |       // 31
+            static_cast<SlotType>(Slot::kLongHair);    // 41
+
+        // Wearing any of these makes it a garment, whatever it is called.
+        constexpr SlotType garmentSlots =
+            static_cast<SlotType>(Slot::kHead) |       // 30 - helmets and hoods
+            static_cast<SlotType>(Slot::kBody) |       // 32
+            static_cast<SlotType>(Slot::kHands) |      // 33
+            static_cast<SlotType>(Slot::kForearms) |   // 34
+            static_cast<SlotType>(Slot::kFeet) |       // 37
+            static_cast<SlotType>(Slot::kCalves) |     // 38
+            static_cast<SlotType>(Slot::kShield);      // 39
+
+        const auto slots = static_cast<SlotType>(armor->GetSlotMask());
+        if ((slots & hairSlots) == 0) return false;
+        if ((slots & garmentSlots) != 0) return false;
+
+        const char* fullName = armor->GetFullName();
+        if (!fullName || !*fullName) return false;
+
+        // Mirrors Data\SKSE\Plugins\VRDressup\Categories\01-wigs.json, which is the
+        // gallery's definition of a wig. Kept here rather than read from there because
+        // undress has to work before the gallery has ever been opened - that JSON is
+        // loaded lazily, on first browse, and needs the whole armour cache behind it.
+        static constexpr const char* kHairWords[] = {
+            "wig", "wigs", "hairdo", "hairdos", "hairstyle", "hairpiece", "peruke",
+            "hair", "ponytail", "braid", "braids", "dreadlocks", "updo"
+        };
+        static constexpr const char* kNotHairWords[] = {
+            "band", "headband", "pin", "hairpin", "clip", "ribbon", "net", "hairnet",
+            "ornament", "comb", "dye", "tie", "accessory", "brush", "oil"
+        };
+
+        std::string name(fullName);
+        std::transform(name.begin(), name.end(), name.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+        // Whole words only, so "hair" does not fire on "chair" and "wig" does not fire on
+        // "wigwam" - but a name run together as one token, like "LenitayriaWig", still
+        // reads as a wig, so that is checked separately below.
+        bool isHair = false;
+        for (std::size_t start = 0; start <= name.size();) {
+            const std::size_t end = name.find_first_not_of(
+                "abcdefghijklmnopqrstuvwxyz", start);
+            const std::size_t stop = (end == std::string::npos) ? name.size() : end;
+
+            if (stop > start) {
+                const std::string_view word(name.data() + start, stop - start);
+                for (const char* veto : kNotHairWords) {
+                    if (word == veto) return false;
+                }
+                for (const char* hit : kHairWords) {
+                    if (word == hit) isHair = true;
+                }
+            }
+
+            if (stop >= name.size()) break;
+            start = stop + 1;
+        }
+
+        return isHair || name.find("wig") != std::string::npos;
+    }
 }
 
 class UndressManager
@@ -91,6 +187,17 @@ public:
         auto armors = ItemEquipHelper::GetInventoryItems<RE::TESObjectARMO>(actor);
 
         for (auto* armor : armors) {
+            // The rendered half of a Devious Device sits in an ordinary biped slot, so it
+            // looks like outer armour from here. Stripping it leaves DD holding a device
+            // that is worn and invisible, which it repairs by putting it straight back.
+            // A partial undress leaves devices alone: the inventory half carries no slot,
+            // so it is not outer armour, and its rendered half stays with it.
+            if (DeviceCompat::IsDevice(armor)) continue;
+
+            // Hair is not clothing - see UndressHelper::IsWig. Wigs come off only when the
+            // player picks one in the wheel.
+            if (UndressHelper::IsWig(armor)) continue;
+
             if (UndressHelper::IsOuterArmor(armor) && ItemEquipHelper::IsArmorEquipped(actor, armor)) {
                 equipManager->UnequipObject(actor, armor, nullptr, 1, nullptr, false, true);
                 spdlog::trace("  - Unequipped outer armor: '{}'", armor->GetFullName());
@@ -132,10 +239,32 @@ public:
         auto armors = ItemEquipHelper::GetInventoryItems<RE::TESObjectARMO>(actor);
 
         for (auto* armor : armors) {
-            if (ItemEquipHelper::IsArmorEquipped(actor, armor)) {
-                equipManager->UnequipObject(actor, armor, nullptr, 1, nullptr, false, true);
-                spdlog::trace("  - Unequipped: '{}'", armor->GetFullName());
+            // Body parts stay on: TNG owns them and puts them back anyway - see
+            // ItemEquipHelper::IsBodyPart.
+            if (ItemEquipHelper::IsBodyPart(armor)) continue;
+
+            // The rendered half of a Devious Device comes off with its inventory half,
+            // through DD, or not at all.
+            if (DeviceCompat::IsRenderedDevice(armor)) continue;
+
+            // Hair stays on even for a full undress - see UndressHelper::IsWig.
+            if (UndressHelper::IsWig(armor)) continue;
+
+            if (!ItemEquipHelper::IsArmorEquipped(actor, armor)) continue;
+
+            if (DeviceCompat::IsInventoryDevice(armor)) {
+                // A full undress means everything, devices included - unlocked without a
+                // key, because this is the wardrobe tool rather than the player picking at
+                // a lock. DD still refuses quest devices, and those stay on.
+                if (!DeviceCompat::Unequip(actor, armor)) {
+                    spdlog::info("  - '{}' stays on: Devious Devices will not release it",
+                        armor->GetFullName());
+                }
+                continue;
             }
+
+            equipManager->UnequipObject(actor, armor, nullptr, 1, nullptr, false, true);
+            spdlog::trace("  - Unequipped: '{}'", armor->GetFullName());
         }
 
         // Update state
@@ -318,15 +447,57 @@ private:
     UndressManager(const UndressManager&) = delete;
     UndressManager& operator=(const UndressManager&) = delete;
 
-    // Save pre-undress outfit (only if not already saved)
+    // Remember what to put back on a redress. Called by both undress paths, so it has to
+    // cope with being handed an NPC who is already half or fully undressed.
     void SavePreUndressOutfit(RE::Actor* actor)
     {
+        if (!actor) return;
+
         auto* outfitMgr = OutfitLockManager::GetSingleton();
+
+        std::vector<std::string> wornKeys;
+        for (auto* armor : ItemEquipHelper::GetInventoryItems<RE::TESObjectARMO>(actor)) {
+            if (!armor || !ItemEquipHelper::IsArmorEquipped(actor, armor)) continue;
+            if (ItemEquipHelper::IsBodyPart(armor)) continue;
+            // Same rule as the outfit snapshot: a device is remembered by its inventory
+            // half, and the rendered half comes back with it.
+            if (DeviceCompat::IsRenderedDevice(armor)) continue;
+            std::string formKey = Persistence::FormKeyUtil::BuildFormKey(armor);
+            if (!formKey.empty()) {
+                wornKeys.push_back(std::move(formKey));
+            }
+        }
+
+        if (wornKeys.empty()) {
+            // Undressing someone who is already undressed. There is nothing to remember,
+            // and writing an empty snapshot over a good one is how a redress ended up
+            // restoring nothing at all.
+            spdlog::info("UndressManager::SavePreUndressOutfit - '{}' has nothing on, keeping "
+                "whatever pre-undress outfit is already stored", actor->GetName());
+            return;
+        }
+
         if (!outfitMgr->HasOutfit(actor, kPreUndressOutfitName)) {
             outfitMgr->SaveOutfit(actor, kPreUndressOutfitName);
-            spdlog::info("UndressManager::SavePreUndressOutfit - Saved pre-undress outfit for '{}'",
-                actor->GetName());
+            spdlog::info("UndressManager::SavePreUndressOutfit - Saved pre-undress outfit for "
+                "'{}' ({} item(s))", actor->GetName(), wornKeys.size());
+            return;
         }
+
+        // A snapshot already exists, from an earlier partial undress. Fold in what is still
+        // worn instead of leaving it alone: those pieces are what this undress is about to
+        // remove, and only what is in here comes back on a redress.
+        std::vector<std::string> merged = outfitMgr->GetOutfitItemFormKeys(actor, kPreUndressOutfitName);
+        for (const auto& formKey : wornKeys) {
+            if (std::find(merged.begin(), merged.end(), formKey) == merged.end()) {
+                merged.push_back(formKey);
+            }
+        }
+
+        const std::uint32_t accepted =
+            outfitMgr->SetOutfitFromFormKeys(actor, kPreUndressOutfitName, merged);
+        spdlog::info("UndressManager::SavePreUndressOutfit - Extended pre-undress outfit for "
+            "'{}' to {} item(s)", actor->GetName(), accepted);
     }
 
     // Set undress state for an actor

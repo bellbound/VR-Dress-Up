@@ -20,7 +20,10 @@ from pathlib import Path
 # Configuration - path relative to script location (skse/<mod>/assets/icons/)
 _SCRIPT_DIR = Path(__file__).parent.resolve()
 _PROJECT_ROOT = _SCRIPT_DIR.parents[3]  # Up 4 levels to project root
-MOD_TEXTURES_DIR = _PROJECT_ROOT / "papyrus" / "mods" / "DressVR" / "textures" / "VRDressup"
+# Matches the folder name in mod-registry.ps1 (PapyrusMod = "VR Dress Up"). It used to say
+# "DressVR", which no longer exists - and because the deploy step creates the directory it
+# writes to, that spelling failed silently by filling an empty folder nothing ever reads.
+MOD_TEXTURES_DIR = _PROJECT_ROOT / "papyrus" / "mods" / "VR Dress Up" / "textures" / "VRDressup"
 
 
 def convert_svgs_to_pngs(svg_dir: Path, png_dir: Path):

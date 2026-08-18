@@ -1,7 +1,7 @@
 #include "OutfitFormBackend.h"
-#include "OutfitLockManager.h"
 #include "PapyrusBridge.h"
 #include "SeverActionsCompat.h"
+#include "DeviceCompat.h"
 #include "FormKeyUtil.h"
 #include "../settings.h"
 
@@ -74,27 +74,7 @@ void OutfitFormBackend::ResolveNativePool()
 
 bool OutfitFormBackend::IsAvailable() const
 {
-    // SeverActions lends us its own records, so its presence is enough even when our
-    // own plugin is missing.
-    return !m_pool.empty() || SeverActionsCompat::IsActive();
-}
-
-void OutfitFormBackend::SetExternalOutfit(RE::Actor* actor, RE::BGSOutfit* outfit)
-{
-    if (!actor) return;
-
-    const std::string actorKey = Persistence::FormKeyUtil::BuildFormKey(actor);
-    if (actorKey.empty()) return;
-
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto* assignment = AssignLocked(actorKey);
-    if (!assignment) return;
-
-    assignment->externalOutfit = outfit;
-    assignment->usesExternal = (outfit != nullptr);
-
-    // Force the next Apply through: the record changed even if the item set did not.
-    assignment->lastApplied.clear();
+    return !m_pool.empty();
 }
 
 bool OutfitFormBackend::IsEligible(RE::Actor* actor) const
@@ -121,33 +101,44 @@ RE::BGSOutfit* OutfitFormBackend::OutfitForIndex(std::size_t index) const
 OutfitFormBackend::Assignment* OutfitFormBackend::AssignLocked(const std::string& actorKey)
 {
     auto it = m_assignments.find(actorKey);
-    if (it != m_assignments.end()) {
-        return &it->second;
+    Assignment* existing = (it != m_assignments.end()) ? &it->second : nullptr;
+    if (existing && existing->poolIndex < m_pool.size()) {
+        return existing;
     }
 
+    // Either a new actor, or one holding no usable slot: an entry made while the pool was
+    // full, or one from a co-save written when the record could come from another mod and
+    // an entry of our own did not need a slot at all.
     std::vector<bool> taken(m_pool.size(), false);
     for (const auto& [key, assignment] : m_assignments) {
-        if (assignment.poolIndex < taken.size()) {
+        if (&assignment != existing && assignment.poolIndex < taken.size()) {
             taken[assignment.poolIndex] = true;
         }
     }
 
-    Assignment fresh;
-    fresh.poolIndex = kNoPoolSlot;
+    std::size_t slot = kNoPoolSlot;
     for (std::size_t i = 0; i < taken.size(); ++i) {
         if (!taken[i]) {
-            fresh.poolIndex = i;
+            slot = i;
             break;
         }
     }
 
-    if (fresh.poolIndex == kNoPoolSlot && !m_pool.empty()) {
-        // Not fatal on its own: under SeverActions the record comes from there, and an
-        // entry with no pool slot is still needed to hold it.
+    if (slot == kNoPoolSlot) {
+        // The entry is still created - it carries the original outfit and the item set -
+        // but with no record to assign, Apply will not dispatch for this actor.
         spdlog::warn("OutfitFormBackend::AssignLocked - Outfit pool exhausted ({} slots)",
             m_pool.size());
     }
 
+    if (existing) {
+        existing->poolIndex = slot;
+        existing->lastApplied.clear();  // different record: the next Apply has to dispatch
+        return existing;
+    }
+
+    Assignment fresh;
+    fresh.poolIndex = slot;
     return &m_assignments.emplace(actorKey, std::move(fresh)).first->second;
 }
 
@@ -163,6 +154,18 @@ bool OutfitFormBackend::Fill(RE::BGSOutfit* outfit, const std::vector<std::strin
 
         auto* form = RE::TESForm::LookupByID(runtimeID);
         if (!form) continue;
+
+        // Devious Devices items are deliberately left out.
+        //
+        // This record only exists to tell SPID the NPC is taken; the engine also *applies*
+        // it, adding a fresh copy of every listed item on each cell load. For ordinary
+        // clothing that is a harmless no-op, but a second copy of a device in the same
+        // inventory is a state DD documents as broken - its own removal path cannot tell
+        // which copy is worn. The lock's reapply puts devices back through DD instead.
+        if (auto* armor = form->As<RE::TESObjectARMO>(); armor && DeviceCompat::IsDevice(armor)) {
+            spdlog::trace("OutfitFormBackend::Fill - Skipping Devious Device '{}'", formKey);
+            continue;
+        }
 
         outfit->outfitItems.push_back(form);
     }
@@ -185,7 +188,10 @@ void OutfitFormBackend::DispatchSetOutfit(RE::Actor* actor, RE::BGSOutfit* outfi
     m_applyUntilMs.store(NowMs() + kApplySettleMs, std::memory_order_relaxed);
     PapyrusBridge::CallActorSetOutfit(actor, outfit, false);
 
-    SeverActionsCompat::ResumeLock(actor);
+    // Held across the same window we ignore our own equip events for. SetOutfit's
+    // implicit UnequipAll reaches Papyrus well after this call returns, so resuming here
+    // would hand the SeverActions debounce exactly the trigger the suspend is for.
+    SeverActionsCompat::ResumeLockAfterMs(actor, kApplySettleMs);
 }
 
 bool OutfitFormBackend::Apply(RE::Actor* actor, const std::vector<std::string>& formKeys)
@@ -218,8 +224,7 @@ bool OutfitFormBackend::Apply(RE::Actor* actor, const std::vector<std::string>& 
         auto* assignment = AssignLocked(actorKey);
         if (!assignment) return false;
 
-        outfit = assignment->usesExternal ? assignment->externalOutfit
-                                          : OutfitForIndex(assignment->poolIndex);
+        outfit = OutfitForIndex(assignment->poolIndex);
         if (!outfit) {
             spdlog::warn("OutfitFormBackend::Apply - No outfit record available for '{}'",
                 actor->GetName());
@@ -304,8 +309,7 @@ void OutfitFormBackend::ReapplyAll()
         std::vector<std::string> keys;
     };
 
-    std::vector<Pending>    pending;
-    std::vector<RE::Actor*> needsReacquire;
+    std::vector<Pending> pending;
 
     {
         std::lock_guard<std::mutex> lock(m_mutex);
@@ -314,15 +318,8 @@ void OutfitFormBackend::ReapplyAll()
             auto* actor = RE::TESForm::LookupByID<RE::Actor>(actorID);
             if (!actor) continue;
 
-            auto* outfit = assignment.usesExternal ? assignment.externalOutfit
-                                                   : OutfitForIndex(assignment.poolIndex);
-            if (!outfit) {
-                // A borrowed record does not survive a load; go and ask for it again.
-                if (assignment.usesExternal) {
-                    needsReacquire.push_back(actor);
-                }
-                continue;
-            }
+            auto* outfit = OutfitForIndex(assignment.poolIndex);
+            if (!outfit) continue;
 
             pending.push_back({actor, outfit, assignment.lastApplied});
         }
@@ -343,66 +340,6 @@ void OutfitFormBackend::ReapplyAll()
             entry.outfit->GetFormEditorID(), entry.actor->GetName());
         DispatchSetOutfit(entry.actor, entry.outfit);
     }
-
-    for (auto* actor : needsReacquire) {
-        spdlog::info("  - Re-acquiring SeverActions outfit record for '{}'", actor->GetName());
-        ReacquireExternal(actor);
-    }
-}
-
-void OutfitFormBackend::ReacquireExternal(RE::Actor* actor)
-{
-    if (!actor) return;
-
-    const RE::FormID actorID = actor->GetFormID();
-    SeverActionsCompat::AcquirePresetOutfit(actor, [actorID](RE::BGSOutfit* outfit) {
-        auto* target = RE::TESForm::LookupByID<RE::Actor>(actorID);
-        if (!target) return;
-
-        auto* backend = OutfitFormBackend::GetSingleton();
-        auto* lockMgr = OutfitLockManager::GetSingleton();
-
-        if (outfit) {
-            backend->SetExternalOutfit(target, outfit);
-        } else {
-            // SeverActions did not produce one. Fall back to our own pool rather than
-            // leaving the actor unprotected.
-            backend->ClearExternalOutfit(target);
-        }
-
-        backend->Apply(target, lockMgr->GetOutfitItemFormKeys(target, "locked"));
-    });
-}
-
-bool OutfitFormBackend::HasOutfitRecord(RE::Actor* actor) const
-{
-    if (!actor) return false;
-
-    const std::string actorKey = Persistence::FormKeyUtil::BuildFormKey(actor);
-    if (actorKey.empty()) return false;
-
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_assignments.find(actorKey);
-    if (it == m_assignments.end()) return false;
-
-    return it->second.usesExternal ? it->second.externalOutfit != nullptr
-                                   : it->second.poolIndex != kNoPoolSlot;
-}
-
-void OutfitFormBackend::ClearExternalOutfit(RE::Actor* actor)
-{
-    if (!actor) return;
-
-    const std::string actorKey = Persistence::FormKeyUtil::BuildFormKey(actor);
-    if (actorKey.empty()) return;
-
-    std::lock_guard<std::mutex> lock(m_mutex);
-    auto it = m_assignments.find(actorKey);
-    if (it == m_assignments.end()) return;
-
-    it->second.externalOutfit = nullptr;
-    it->second.usesExternal = false;
-    it->second.lastApplied.clear();
 }
 
 void OutfitFormBackend::Forget(RE::Actor* actor)
@@ -454,11 +391,6 @@ void OutfitFormBackend::OnGameSave(SKSE::SerializationInterface* a_intfc)
         for (const auto& itemKey : assignment.lastApplied) {
             writeString(itemKey);
         }
-
-        // v2: the record itself is not saved - the provider hands it back on request -
-        // but a load has to know to go and ask.
-        std::uint8_t usesExternal = assignment.usesExternal ? 1 : 0;
-        a_intfc->WriteRecordData(&usesExternal, sizeof(usesExternal));
     }
 
     spdlog::info("OutfitFormBackend::OnGameSave - Saved {} outfit assignment(s)", count);
@@ -476,8 +408,8 @@ void OutfitFormBackend::OnLoadRecord(SKSE::SerializationInterface* a_intfc,
 {
     if (type != kRecord) return;
 
-    // v1 records load fine: v2 only appends a field per assignment, so an older co-save
-    // simply carries no borrowed-record flag.
+    // v1 and v3 records have the same layout; v2 carries one extra byte per assignment,
+    // the borrowed-record flag, which is read and discarded below.
     if (version < kMinReadableVersion || version > kSerializationVersion) {
         spdlog::warn("OutfitFormBackend::OnLoadRecord - Incompatible version {} (readable range {}..{}), skipping",
             version, kMinReadableVersion, kSerializationVersion);
@@ -512,7 +444,9 @@ void OutfitFormBackend::OnLoadRecord(SKSE::SerializationInterface* a_intfc,
 
         std::uint32_t poolIndex = 0;
         a_intfc->ReadRecordData(&poolIndex, sizeof(poolIndex));
-        assignment.poolIndex = poolIndex;
+        // kNoPoolSlot is size_t(-1) and was written truncated to 32 bits, so it has to be
+        // widened back to the sentinel rather than read as index 0xFFFFFFFF.
+        assignment.poolIndex = (poolIndex == UINT32_MAX) ? kNoPoolSlot : poolIndex;
 
         readString(assignment.originalOutfitKey);
 
@@ -525,10 +459,15 @@ void OutfitFormBackend::OnLoadRecord(SKSE::SerializationInterface* a_intfc,
             assignment.lastApplied.push_back(std::move(itemKey));
         }
 
-        if (version >= 2) {
-            std::uint8_t usesExternal = 0;
-            a_intfc->ReadRecordData(&usesExternal, sizeof(usesExternal));
-            assignment.usesExternal = usesExternal != 0;
+        if (version == 2) {
+            // The borrowed-record flag. Records are no longer borrowed, but the byte is
+            // in the stream and has to come out of it before the next assignment reads.
+            std::uint8_t usedExternal = 0;
+            a_intfc->ReadRecordData(&usedExternal, sizeof(usedExternal));
+            if (usedExternal != 0) {
+                spdlog::info("  - Assignment previously used another mod's outfit record; "
+                    "it will be re-assigned one from our own pool");
+            }
         }
 
         // Read first, decide afterwards - the record has to be consumed in full even

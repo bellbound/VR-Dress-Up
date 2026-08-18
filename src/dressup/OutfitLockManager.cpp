@@ -1,13 +1,24 @@
 #include "OutfitLockManager.h"
 #include "OutfitFormBackend.h"
+#include "ItemEquipHelper.h"
+#include "DeviceCompat.h"
+#include "PapyrusBridge.h"
 #include "SeverActionsCompat.h"
+#include "WeaponLockManager.h"
+#include "../settings.h"
+
+#include <algorithm>
+#include <chrono>
 #include <spdlog/spdlog.h>
 
-// Biped slots for body armor (30-45)
-// These map to RE::BIPED_MODEL::BipedObjectSlot enum values
-static constexpr std::uint32_t kArmorSlots[] = {
-    30, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45
-};
+namespace
+{
+    std::int64_t NowMs()
+    {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+}
 
 void OutfitLockManager::Initialize()
 {
@@ -41,6 +52,11 @@ RE::BSEventNotifyControl OutfitLockManager::ProcessEvent(
         return RE::BSEventNotifyControl::kContinue;
     }
 
+    // This runs on the game thread for every equip in the loaded area. When another mod
+    // puts an NPC into an equip loop that is hundreds of events a second, so everything
+    // below is ordered cheapest-test-first and nothing allocates until we know the event
+    // is one we actually act on.
+
     // Assigning an outfit makes the engine queue an UnequipAll, so the events that
     // arrive just after are our own doing, not the player's.
     if (OutfitFormBackend::GetSingleton()->IsApplying()) {
@@ -49,11 +65,49 @@ RE::BSEventNotifyControl OutfitLockManager::ProcessEvent(
 
     // Get actor reference
     auto* actor = a_event->actor ? a_event->actor->As<RE::Actor>() : nullptr;
+    if (!actor) {
+        return RE::BSEventNotifyControl::kContinue;
+    }
 
-    // Get actor name if available
-    const char* actorName = actor ? actor->GetName() : "unknown";
+    const RE::FormID actorID = actor->GetFormID();
 
-    // Get base object name if available
+    // Our own ApplyOutfit equips land here too - see BeginSelfDriven.
+    if (IsSelfDriven(actorID)) {
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
+    // Count the event even for the player, so the breaker sees the true rate.
+    const bool inStorm = NoteEquipAndCheckStorm(actorID, actor->GetName());
+
+    // Someone else changed a locked NPC's gear: put it back. Ordered so that the usual
+    // case - no locked NPC in the save, or none of this is enabled - costs two atomic
+    // loads. Nothing to do while a storm is already in progress either; feeding it is the
+    // one thing the breaker exists to prevent.
+    if (!inStorm && m_lockedCount.load(std::memory_order_relaxed) > 0 &&
+        m_userEditCount.load(std::memory_order_relaxed) == 0 &&
+        !actor->IsPlayerRef() &&
+        Settings::GetSingleton()->IsReapplyOnExternalChangeEnabled()) {
+        NoteExternalOutfitChange(actor, a_event->baseObject);
+    }
+
+    // Everything past here is gallery-item cleanup, which only ever applies to a
+    // non-player actor unequipping something.
+    if (a_event->equipped || actor->IsPlayerRef()) {
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
+    // Lock-free reject for the overwhelmingly common case of no gallery items anywhere.
+    if (!m_hasGalleryItems.load(std::memory_order_relaxed)) {
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
+    if (!IsGallerySpawnedItem(actor, a_event->baseObject)) {
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
+    // Relevant event: now it is worth resolving names.
+    const char* actorName = actor->GetName();
+
     std::string baseObjectName = "unknown";
     if (auto* form = RE::TESForm::LookupByID(a_event->baseObject)) {
         if (auto* name = form->GetName(); name && name[0]) {
@@ -63,47 +117,317 @@ RE::BSEventNotifyControl OutfitLockManager::ProcessEvent(
         }
     }
 
-    spdlog::trace("OutfitLockManager::ProcessEvent - Actor: {}, BaseObject: {}, Equipped: {}, UniqueID: {}",
-        actorName,
-        baseObjectName,
-        a_event->equipped ? "true" : "false",
-        a_event->uniqueID);
+    // Capture IDs for deferred task (pointers may become invalid)
+    RE::FormID itemID = a_event->baseObject;
+    std::string itemName = baseObjectName;
 
-    // Handle gallery item destruction on unequip
-    if (!a_event->equipped && actor && !actor->IsPlayerRef()) {
-        // Check if this item was gallery-spawned
-        if (IsGallerySpawnedItem(actor, a_event->baseObject)) {
-            // Capture IDs for deferred task (pointers may become invalid)
-            RE::FormID actorID = actor->GetFormID();
-            RE::FormID itemID = a_event->baseObject;
-            std::string itemName = baseObjectName;
+    // Unmark immediately to prevent double-processing if re-equipped quickly
+    UnmarkGalleryItem(actor, itemID);
 
-            // Unmark immediately to prevent double-processing if re-equipped quickly
-            UnmarkGalleryItem(actor, itemID);
+    // Defer the actual removal to the next frame to avoid race condition
+    // The unequip operation may still be modifying inventory state when this event fires
+    SKSE::GetTaskInterface()->AddTask([actorID, itemID, itemName]() {
+        auto* targetActor = RE::TESForm::LookupByID<RE::Actor>(actorID);
+        auto* form = RE::TESForm::LookupByID(itemID);
 
-            // Defer the actual removal to the next frame to avoid race condition
-            // The unequip operation may still be modifying inventory state when this event fires
-            SKSE::GetTaskInterface()->AddTask([actorID, itemID, itemName]() {
-                auto* targetActor = RE::TESForm::LookupByID<RE::Actor>(actorID);
-                auto* form = RE::TESForm::LookupByID(itemID);
+        if (targetActor && form) {
+            auto* boundObj = form->As<RE::TESBoundObject>();
+            if (boundObj) {
+                targetActor->RemoveItem(boundObj, 1,
+                    RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
+                spdlog::info("OutfitLockManager - Destroyed gallery-spawned item '{}' (0x{:08X}) from '{}'",
+                    itemName, itemID, targetActor->GetName());
+            }
+        }
+    });
 
-                if (targetActor && form) {
-                    auto* boundObj = form->As<RE::TESBoundObject>();
-                    if (boundObj) {
-                        targetActor->RemoveItem(boundObj, 1,
-                            RE::ITEM_REMOVE_REASON::kRemove, nullptr, nullptr);
-                        spdlog::info("OutfitLockManager - Destroyed gallery-spawned item '{}' (0x{:08X}) from '{}'",
-                            itemName, itemID, targetActor->GetName());
-                    }
-                }
-            });
+    spdlog::info("OutfitLockManager::ProcessEvent - Queued destruction of gallery-spawned item '{}' (0x{:08X}) from '{}'",
+        baseObjectName, itemID, actorName);
 
-            spdlog::info("OutfitLockManager::ProcessEvent - Queued destruction of gallery-spawned item '{}' (0x{:08X}) from '{}'",
-                baseObjectName, a_event->baseObject, actorName);
+    return RE::BSEventNotifyControl::kContinue;
+}
+
+// =============================================================================
+// Re-entrancy, storm detection and debounce
+// =============================================================================
+
+void OutfitLockManager::BeginSelfDriven(RE::FormID actorID)
+{
+    std::lock_guard<std::mutex> lock(m_selfDrivenMutex);
+    m_selfDriven.insert(actorID);
+    m_selfDrivenCount.store(static_cast<int>(m_selfDriven.size()), std::memory_order_relaxed);
+}
+
+void OutfitLockManager::EndSelfDriven(RE::FormID actorID)
+{
+    std::lock_guard<std::mutex> lock(m_selfDrivenMutex);
+    m_selfDriven.erase(actorID);
+    m_selfDrivenCount.store(static_cast<int>(m_selfDriven.size()), std::memory_order_relaxed);
+}
+
+bool OutfitLockManager::IsSelfDriven(RE::FormID actorID) const
+{
+    // Nothing in flight is the normal state, and checking that costs one atomic load
+    // rather than a lock on the game thread.
+    if (m_selfDrivenCount.load(std::memory_order_relaxed) == 0) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(m_selfDrivenMutex);
+    return m_selfDriven.contains(actorID);
+}
+
+bool OutfitLockManager::NoteEquipAndCheckStorm(RE::FormID actorID, const char* actorName)
+{
+    const std::int64_t now = NowMs();
+
+    std::lock_guard<std::mutex> lock(m_equipRateMutex);
+    auto& rate = m_equipRate[actorID];
+
+    if (now < rate.backoffUntilMs) {
+        return true;
+    }
+
+    // Backoff just expired - start clean rather than judging on a stale window.
+    if (rate.backoffUntilMs != 0) {
+        rate.backoffUntilMs = 0;
+        rate.reported = false;
+        rate.windowStartMs = now;
+        rate.count = 0;
+    }
+
+    if (now - rate.windowStartMs > kStormWindowMs) {
+        rate.windowStartMs = now;
+        rate.count = 0;
+    }
+
+    if (++rate.count < kStormThreshold) {
+        return false;
+    }
+
+    rate.backoffUntilMs = now + kStormBackoffMs;
+    if (!rate.reported) {
+        rate.reported = true;
+        spdlog::error("OutfitLockManager - EQUIP STORM: '{}' (0x{:08X}) produced {} equip events in "
+                      "under {}ms. Backing off reapplies for {}s. Something else is cycling this "
+                      "actor's equipment; every one of those events also runs XPMSE/DD/OBody "
+                      "Papyrus, which is what drives the VM into a stack-dump freeze.",
+            actorName ? actorName : "unknown", actorID, rate.count, kStormWindowMs,
+            kStormBackoffMs / 1000);
+    }
+    return true;
+}
+
+bool OutfitLockManager::IsInEquipBackoff(RE::FormID actorID) const
+{
+    std::lock_guard<std::mutex> lock(m_equipRateMutex);
+    const auto it = m_equipRate.find(actorID);
+    return it != m_equipRate.end() && NowMs() < it->second.backoffUntilMs;
+}
+
+void OutfitLockManager::BeginUserEdit()
+{
+    m_userEditCount.fetch_add(1, std::memory_order_relaxed);
+}
+
+void OutfitLockManager::EndUserEdit()
+{
+    m_userEditCount.fetch_sub(1, std::memory_order_relaxed);
+}
+
+void OutfitLockManager::RefreshLockedCount()
+{
+    int locked = 0;
+    for (const auto& [key, outfit] : m_outfits) {
+        if (key.outfitName == "locked") ++locked;
+    }
+    m_lockedCount.store(locked, std::memory_order_relaxed);
+}
+
+void OutfitLockManager::NoteExternalOutfitChange(RE::Actor* actor, RE::FormID baseObject)
+{
+    // A locked outfit is armour only. Drawing a sword or burning through arrows is not a
+    // change to the look we are defending, and reacting to it would make every fight a
+    // reapply storm on its own.
+    auto* form = RE::TESForm::LookupByID(baseObject);
+    auto* armor = form ? form->As<RE::TESObjectARMO>() : nullptr;
+    if (!armor) {
+        return;
+    }
+
+    // Devious Devices equips and unequips the rendered half of a device constantly - on
+    // load, on cell change, whenever it repairs a pairing. None of that is a change to the
+    // look we are defending, because the rendered half is not in the outfit; reacting to it
+    // scheduled a reapply that then found nothing to do, once per device per transition.
+    if (DeviceCompat::IsRenderedDevice(armor)) {
+        return;
+    }
+
+    const RE::FormID actorID = actor->GetFormID();
+    const std::int64_t now = NowMs();
+
+    // Peek before the expensive test: during a burst this is every event after the first,
+    // and IsLocked takes m_mutex - which ApplyOutfit holds - on the game thread.
+    {
+        std::lock_guard<std::mutex> lock(m_reapplyMutex);
+        const auto it = m_reapply.find(actorID);
+        if (it != m_reapply.end() && (it->second.pending || now < it->second.backoffUntilMs)) {
+            return;
         }
     }
 
-    return RE::BSEventNotifyControl::kContinue;
+    if (!IsLocked(actor)) {
+        return;
+    }
+
+    const auto delayMs = Settings::GetSingleton()->GetReapplyDelayMs();
+
+    {
+        std::lock_guard<std::mutex> lock(m_reapplyMutex);
+        auto& state = m_reapply[actorID];
+        if (state.pending || now < state.backoffUntilMs) {
+            return;  // lost the race against another event on this actor
+        }
+        state.pending = true;
+    }
+
+    spdlog::info("OutfitLockManager - '{}' (0x{:08X}) had armour changed by something else; "
+                 "reapplying the locked outfit in {}ms",
+        actor->GetName(), actorID, delayMs);
+
+    PapyrusBridge::RunAfterMs(delayMs, [actorID]() {
+        GetSingleton()->RunPendingReapply(actorID);
+    });
+}
+
+void OutfitLockManager::RunPendingReapply(RE::FormID actorID)
+{
+    // Clear the coalescing flag first, whatever happens below: leaving it set would mean
+    // this actor never schedules another reapply for the rest of the session.
+    {
+        std::lock_guard<std::mutex> lock(m_reapplyMutex);
+        const auto it = m_reapply.find(actorID);
+        if (it == m_reapply.end()) {
+            return;  // reverted out from under us
+        }
+        it->second.pending = false;
+    }
+
+    auto* actor = RE::TESForm::LookupByID<RE::Actor>(actorID);
+    if (!actor || !actor->Is3DLoaded() || !IsLocked(actor)) {
+        return;
+    }
+
+    // A menu edit that started during the delay owns this actor's gear for now, and will
+    // re-save the lock when it ends.
+    if (m_userEditCount.load(std::memory_order_relaxed) != 0) {
+        spdlog::trace("OutfitLockManager - Skipping reapply for '{}': menu edit in progress",
+            actor->GetName());
+        return;
+    }
+
+    // The per-event breaker may have tripped while we were waiting.
+    if (IsInEquipBackoff(actorID)) {
+        spdlog::warn("OutfitLockManager - Not reapplying to '{}': equip-storm backoff", actor->GetName());
+        return;
+    }
+
+    if (!DiffersFromLockedOutfit(actor)) {
+        spdlog::trace("OutfitLockManager - '{}' is already wearing the locked outfit, nothing to reapply",
+            actor->GetName());
+        return;
+    }
+
+    if (!ClaimReapplySlot(actorID, actor->GetName())) {
+        return;
+    }
+
+    // Same bracket the location-change path uses: the unequip half would otherwise trip
+    // SeverActions' alias debounce and have it re-dress the NPC on top of us.
+    SeverActionsCompat::SuspendLock(actor);
+    ApplyOutfit(actor, "locked", true);
+    SeverActionsCompat::ResumeLockAfterMs(actor, SeverActionsCompat::kEquipSettleMs);
+}
+
+bool OutfitLockManager::DiffersFromLockedOutfit(RE::Actor* actor) const
+{
+    SavedOutfit outfit;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto it = m_outfits.find(OutfitKey{actor->GetFormID(), "locked"});
+        if (it == m_outfits.end()) {
+            return false;
+        }
+        outfit = it->second;  // FormKey resolution below is not worth holding the lock for
+    }
+
+    // Both sides skip body parts and rendered devices, the same way GetEquippedArmor and
+    // ApplyOutfit do: TNG owns the former and DD the latter, and both put their pieces back
+    // regardless, so counting them would make every actor look permanently diverged.
+    std::vector<RE::FormID> want;
+    want.reserve(outfit.items.size());
+    for (const auto& item : outfit.items) {
+        auto* armor = item.GetArmor();
+        if (!armor) continue;
+        if (ItemEquipHelper::IsBodyPart(armor)) continue;
+        if (DeviceCompat::IsRenderedDevice(armor)) continue;
+        want.push_back(armor->GetFormID());
+    }
+
+    std::vector<RE::FormID> worn;
+    for (auto* armor : GetEquippedArmor(actor)) {
+        worn.push_back(armor->GetFormID());
+    }
+
+    std::sort(want.begin(), want.end());
+    std::sort(worn.begin(), worn.end());
+    return want != worn;
+}
+
+bool OutfitLockManager::ClaimReapplySlot(RE::FormID actorID, const char* actorName)
+{
+    const auto* settings = Settings::GetSingleton();
+    const double allowance = static_cast<double>(settings->GetReapplyBurstAllowance());
+    const double drainPerMs = 1.0 / (settings->GetReapplySustainedIntervalSec() * 1000.0);
+    const std::int64_t backoffMs = static_cast<std::int64_t>(settings->GetReapplyBackoffSec()) * 1000;
+
+    const std::int64_t now = NowMs();
+
+    std::lock_guard<std::mutex> lock(m_reapplyMutex);
+    auto& state = m_reapply[actorID];
+
+    if (now < state.backoffUntilMs) {
+        return false;
+    }
+
+    // Drain what the elapsed time has earned back, then charge for this reapply. Under the
+    // allowance nothing is throttled at all, which is what keeps an ordinary burst - or an
+    // NPC who gets stripped once and redressed once - free.
+    if (state.lastReapplyMs != 0) {
+        state.burst -= static_cast<double>(now - state.lastReapplyMs) * drainPerMs;
+        if (state.burst < 0.0) state.burst = 0.0;
+    }
+    state.lastReapplyMs = now;
+    state.burst += 1.0;
+
+    if (state.burst <= allowance) {
+        state.reported = false;
+        return true;
+    }
+
+    state.backoffUntilMs = now + backoffMs;
+    state.burst = 0.0;
+    if (!state.reported) {
+        state.reported = true;
+        spdlog::error("OutfitLockManager - OUTFIT TUG-OF-WAR: '{}' (0x{:08X}) has been redressed "
+                      "{} times faster than one per {}s. Something else is changing this NPC's "
+                      "outfit as fast as we put it back, so we are standing down for {}s rather "
+                      "than trading equips with it - each exchange also runs XPMSE/DD/OBody "
+                      "Papyrus for both mods. Unlock this NPC, or turn off "
+                      "bReapplyOnExternalChange, if it keeps happening.",
+            actorName ? actorName : "unknown", actorID, settings->GetReapplyBurstAllowance(),
+            settings->GetReapplySustainedIntervalSec(), settings->GetReapplyBackoffSec());
+    }
+    return false;
 }
 
 RE::BSEventNotifyControl OutfitLockManager::ProcessEvent(
@@ -144,48 +468,90 @@ std::vector<RE::TESObjectARMO*> OutfitLockManager::GetEquippedArmor(RE::Actor* a
     std::vector<RE::TESObjectARMO*> result;
     if (!actor) return result;
 
-    // Check each armor slot for equipped items
-    for (std::uint32_t slot : kArmorSlots) {
-        // Convert slot number to biped mask
-        // Slot 30 = Head, 31 = Hair, 32 = Body, etc.
-        // The slot mask is 1 << (slot - 30)
-        auto slotMask = static_cast<RE::BIPED_MODEL::BipedObjectSlot>(1 << (slot - 30));
-        auto* armor = actor->GetWornArmor(slotMask);
-        if (armor) {
-            // Avoid duplicates (an armor piece can cover multiple slots)
-            bool alreadyAdded = false;
-            for (auto* existing : result) {
-                if (existing->GetFormID() == armor->GetFormID()) {
-                    alreadyAdded = true;
-                    break;
-                }
-            }
-            if (!alreadyAdded) {
-                result.push_back(armor);
-            }
+    // Asked per item, against each armour's own slot mask, rather than by probing a fixed
+    // list of biped slots. The old list was 30 and 32-45, which misses everything worn in
+    // 46-61 - where the Devious-Devices-style pieces sit. UndressManager decides what to
+    // take off with exactly this test, so a snapshot built any other way could not put
+    // back everything an undress had removed: it saved "no equipped armor" for an NPC
+    // wearing three visible items, and the redress that followed restored nothing.
+    for (auto* armor : ItemEquipHelper::GetInventoryItems<RE::TESObjectARMO>(actor)) {
+        if (!armor || !ItemEquipHelper::IsArmorEquipped(actor, armor)) continue;
+
+        // Not ours to record or to strip - see ItemEquipHelper::IsBodyPart.
+        if (ItemEquipHelper::IsBodyPart(armor)) continue;
+
+        // A Devious Devices item is two armour records, and only the inventory half is
+        // ours to record. The rendered half is put on by DD in reaction to that one, so
+        // storing it would mean the outfit describes the same device twice - and putting
+        // it back would mean equipping it behind DD's back. See DeviceCompat.
+        if (DeviceCompat::IsRenderedDevice(armor)) continue;
+
+        // An armour piece covering several slots is still one item.
+        const auto duplicate = std::find_if(result.begin(), result.end(),
+            [armor](RE::TESObjectARMO* existing) {
+                return existing->GetFormID() == armor->GetFormID();
+            });
+        if (duplicate == result.end()) {
+            result.push_back(armor);
         }
+    }
+
+    // Plus anything we have asked the engine to put on that it has not applied yet. Equips
+    // are queued, so a snapshot taken in the same frame as one - which is exactly what the
+    // re-save at the end of a user edit is - would otherwise miss the piece the player just
+    // picked, and the reapply that follows would strip it as somebody else's gear. See
+    // ItemEquipHelper's "Queued equips" note.
+    for (auto* armor : ItemEquipHelper::GetPendingEquips(actor)) {
+        if (!armor || ItemEquipHelper::IsBodyPart(armor)) continue;
+        if (DeviceCompat::IsRenderedDevice(armor)) continue;
+
+        const auto duplicate = std::find_if(result.begin(), result.end(),
+            [armor](RE::TESObjectARMO* existing) {
+                return existing->GetFormID() == armor->GetFormID();
+            });
+        if (duplicate != result.end()) continue;
+
+        spdlog::debug("OutfitLockManager::GetEquippedArmor - counting '{}' (0x{:08X}): equipped "
+            "this frame, engine has not applied it yet",
+            armor->GetFullName(), armor->GetFormID());
+        result.push_back(armor);
     }
 
     return result;
 }
 
-void OutfitLockManager::UnequipArmorSlots(RE::Actor* actor)
+void OutfitLockManager::UnequipArmorExcept(RE::Actor* actor,
+    const std::vector<RE::TESObjectARMO*>& keep)
 {
     if (!actor) return;
 
     auto* equipManager = RE::ActorEquipManager::GetSingleton();
     if (!equipManager) {
-        spdlog::error("OutfitLockManager::UnequipArmorSlots - No ActorEquipManager");
+        spdlog::error("OutfitLockManager::UnequipArmorExcept - No ActorEquipManager");
         return;
     }
 
-    // Get all equipped armor first
-    auto equipped = GetEquippedArmor(actor);
+    for (auto* armor : GetEquippedArmor(actor)) {
+        const bool wanted = std::find_if(keep.begin(), keep.end(),
+            [armor](RE::TESObjectARMO* target) {
+                return target && target->GetFormID() == armor->GetFormID();
+            }) != keep.end();
 
-    // Unequip each piece
-    for (auto* armor : equipped) {
+        if (wanted) continue;
+
+        // Devices come off through DD, which removes the rendered half and unwinds the
+        // effects with it. Pulling the inventory half out from under DD instead is what
+        // made it re-equip the device a moment later.
+        if (DeviceCompat::IsInventoryDevice(armor)) {
+            if (!DeviceCompat::Unequip(actor, armor)) {
+                spdlog::info("OutfitLockManager::UnequipArmorExcept - '{}' stays on: Devious "
+                    "Devices will not release it", armor->GetFullName());
+            }
+            continue;
+        }
+
         equipManager->UnequipObject(actor, armor, nullptr, 1, nullptr, false, true);
-        spdlog::trace("OutfitLockManager::UnequipArmorSlots - Unequipped '{}'", armor->GetFullName());
+        spdlog::trace("OutfitLockManager::UnequipArmorExcept - Unequipped '{}'", armor->GetFullName());
     }
 }
 
@@ -202,12 +568,28 @@ void OutfitLockManager::EquipArmorList(RE::Actor* actor, const std::vector<RE::T
     for (auto* armor : items) {
         if (!armor) continue;
 
+        // Already worn: equipping it again is a no-op the engine still turns into a
+        // TESEquipEvent, and every one of those runs a slice of Papyrus in every mod
+        // listening. On a reapply where nothing changed this is the whole list.
+        if (ItemEquipHelper::IsArmorEquipped(actor, armor)) {
+            continue;
+        }
+
         // Check if actor has this item in inventory
         auto inventory = actor->GetInventory([armor](RE::TESBoundObject& obj) {
             return obj.GetFormID() == armor->GetFormID();
         });
 
         if (!inventory.empty()) {
+            // Devices go on through DD, which puts the rendered half on and starts the
+            // effects. Equipping the inventory half directly fires DD's OnEquipped anyway,
+            // but with none of the state it expects, so it re-runs the whole lock sequence
+            // to repair itself - once per reapply, i.e. once per cell change.
+            if (DeviceCompat::IsInventoryDevice(armor)) {
+                DeviceCompat::Equip(actor, armor);
+                continue;
+            }
+
             equipManager->EquipObject(actor, armor, nullptr, 1, nullptr, true, false, false);
             spdlog::trace("OutfitLockManager::EquipArmorList - Equipped '{}'", armor->GetFullName());
         } else {
@@ -269,13 +651,18 @@ bool OutfitLockManager::SaveOutfit(RE::Actor* actor, const std::string& outfitNa
 
     OutfitKey key{actor->GetFormID(), outfitName};
 
+    // The stored count, not the worn count: an item with no source file is skipped above, and
+    // reporting what was worn made the log claim to have saved a piece it had dropped.
+    const size_t stored = outfit.items.size();
+
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_outfits[key] = std::move(outfit);
+        RefreshLockedCount();
     }
 
-    spdlog::info("OutfitLockManager::SaveOutfit - Saved {} items for outfit '{}'",
-        equipped.size(), outfitName);
+    spdlog::info("OutfitLockManager::SaveOutfit - Saved {} of {} worn items for outfit '{}'",
+        stored, equipped.size(), outfitName);
 
     return true;
 }
@@ -312,12 +699,13 @@ bool OutfitLockManager::ApplyOutfit(RE::Actor* actor, const std::string& outfitN
     spdlog::info("OutfitLockManager::ApplyOutfit - Applying outfit '{}' to actor '{}' (unequipOthers={})",
         outfitName, actor->GetName(), unequipOthers);
 
-    // Unequip existing armor if requested
-    if (unequipOthers) {
-        UnequipArmorSlots(actor);
-    }
-
-    // Build list of valid armor to equip, removing invalid items or items NPC doesn't have
+    // Build list of valid armor to equip, removing invalid items or items NPC doesn't have.
+    //
+    // Built *before* anything is taken off. This used to strip the actor first and then
+    // decide what to put back, which meant a reapply that changed nothing still generated
+    // an unequip and an equip for every piece - and each of those runs XPMSE's restyle,
+    // Devious Devices' slotmask rebuild and an OBody preset pass in Papyrus. Diffing
+    // against what is already worn makes the common no-change reapply cost zero events.
     std::vector<RE::TESObjectARMO*> validArmor;
     std::vector<std::string> keysToRemove;
 
@@ -330,6 +718,26 @@ bool OutfitLockManager::ApplyOutfit(RE::Actor* actor, const std::string& outfitN
         }
 
         auto* armor = item.GetArmor();
+
+        // Drops body parts back out of outfits stored before we started skipping them,
+        // so an old save stops re-equipping a TNG addon the player has since removed.
+        if (ItemEquipHelper::IsBodyPart(armor)) {
+            keysToRemove.push_back(item.formKey);
+            spdlog::info("  - '{}' ({}) is a body part, not clothing - dropping it from the outfit "
+                "and leaving it to the mod that manages it", armor->GetFullName(), item.formKey);
+            continue;
+        }
+
+        // Same for the rendered half of a Devious Devices item. Outfits snapshotted before
+        // we understood the pairing hold these, and putting one back by hand is precisely
+        // the desync DD then spends a cell transition repairing. The inventory half in the
+        // same outfit is what actually restores the device.
+        if (DeviceCompat::IsRenderedDevice(armor)) {
+            keysToRemove.push_back(item.formKey);
+            spdlog::info("  - {} is the rendered half of a Devious Device - dropping it from the "
+                "outfit and leaving it to DD", item.formKey);
+            continue;
+        }
 
         // Check if NPC actually has this item in their inventory
         auto inventory = actor->GetInventory([armor](RE::TESBoundObject& obj) {
@@ -365,8 +773,22 @@ bool OutfitLockManager::ApplyOutfit(RE::Actor* actor, const std::string& outfitN
         }
     }
 
-    // Equip valid armor
-    EquipArmorList(actor, validArmor);
+    // Our own equip traffic from here on, so the handler above ignores it rather than
+    // treating it as the player undressing someone.
+    {
+        SelfDrivenScope selfDriven(this, actor->GetFormID());
+
+        if (unequipOthers) {
+            UnequipArmorExcept(actor, validArmor);
+        }
+
+        EquipArmorList(actor, validArmor);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_lastApplyMutex);
+        m_lastApplyMs[actor->GetFormID()] = NowMs();
+    }
 
     spdlog::info("OutfitLockManager::ApplyOutfit - Applied {} items from outfit '{}'",
         validArmor.size(), outfitName);
@@ -389,6 +811,7 @@ bool OutfitLockManager::DeleteOutfit(RE::Actor* actor, const std::string& outfit
     }
 
     m_outfits.erase(it);
+    RefreshLockedCount();
     spdlog::info("OutfitLockManager::DeleteOutfit - Deleted outfit '{}' for actor '{}'",
         outfitName, actor->GetName());
 
@@ -424,9 +847,9 @@ bool OutfitLockManager::Lock(RE::Actor* actor)
         return false;
     }
 
-    // Hand the look to whoever will defend it. SeverActions maintains it through its
-    // own alias if it is installed; the outfit record is what makes SPID stand down.
-    SeverActionsCompat::HandOffOutfit(actor);
+    // We defend the look from here on: SeverActions is asked to leave this NPC alone if
+    // it is installed, and the outfit record is what makes SPID stand down.
+    SeverActionsCompat::TakeOver(actor);
     PromoteLockToOutfitForm(actor);
 
     return true;
@@ -442,10 +865,16 @@ bool OutfitLockManager::Unlock(RE::Actor* actor)
     spdlog::info("OutfitLockManager::Unlock - Unlocking actor '{}' (0x{:08X})",
         actor->GetName(), actor->GetFormID());
 
-    // Give the NPC back to whoever had them: restoring the original outfit is what
-    // lets SPID resume distributing to this actor.
-    SeverActionsCompat::ReleaseOutfit(actor);
+    // Give the NPC back to whoever had them: restoring the original outfit is what lets
+    // SPID resume distributing to this actor. Restore first, then release - the other way
+    // round the SeverActions alias would be live again for the equip events our own
+    // restore is about to queue.
     OutfitFormBackend::GetSingleton()->Restore(actor);
+    SeverActionsCompat::Release(actor);
+
+    // Unlocking hands the NPC back whole. Leaving the no-weapon lock running afterwards
+    // would keep one half of our grip on an actor the player has explicitly let go.
+    WeaponLockManager::GetSingleton()->StopEnforcing(actor);
 
     return DeleteOutfit(actor, "locked");
 }
@@ -461,14 +890,6 @@ void OutfitLockManager::PromoteLockToOutfitForm(RE::Actor* actor)
 
     auto* backend = OutfitFormBackend::GetSingleton();
     if (!backend->IsAvailable() || !backend->IsEligible(actor)) return;
-
-    // Under SeverActions the record we assign is one of its own, which it only creates
-    // once it has finished building the preset. Ask for it, and assign whatever comes
-    // back - our own pool if it never produces one.
-    if (SeverActionsCompat::IsActive() && !backend->HasOutfitRecord(actor)) {
-        backend->ReacquireExternal(actor);
-        return;
-    }
 
     backend->Apply(actor, GetOutfitItemFormKeys(actor, "locked"));
 }
@@ -559,7 +980,17 @@ void OutfitLockManager::ReturnPlayerItems(RE::Actor* actor)
 
         // Unequip if it's armor
         if (auto* armor = form->As<RE::TESObjectARMO>()) {
-            equipManager->UnequipObject(actor, armor, nullptr, 1, nullptr, false, true);
+            if (DeviceCompat::IsInventoryDevice(armor)) {
+                // A device has to be unlocked before it can change hands, and DD may say
+                // no. Taking it back anyway would leave the rendered half on the NPC.
+                if (!DeviceCompat::Unequip(actor, armor)) {
+                    spdlog::info("  - Leaving '{}' (0x{:08X}) on '{}': Devious Devices will not "
+                        "release it", form->GetName(), itemID, actor->GetName());
+                    continue;
+                }
+            } else {
+                equipManager->UnequipObject(actor, armor, nullptr, 1, nullptr, false, true);
+            }
         }
 
         // Transfer to player
@@ -599,6 +1030,7 @@ void OutfitLockManager::MarkItemAsGallerySpawned(RE::Actor* actor, RE::FormID it
 
     std::lock_guard<std::mutex> lock(m_mutex);
     m_gallerySpawnedItems[actor->GetFormID()].insert(itemID);
+    m_hasGalleryItems.store(true, std::memory_order_relaxed);
 
     spdlog::info("OutfitLockManager::MarkItemAsGallerySpawned - Marked item 0x{:08X} as gallery-spawned for '{}'",
         itemID, actor->GetName());
@@ -628,6 +1060,7 @@ void OutfitLockManager::UnmarkGalleryItem(RE::Actor* actor, RE::FormID itemID)
             m_gallerySpawnedItems.erase(it);
         }
     }
+    m_hasGalleryItems.store(!m_gallerySpawnedItems.empty(), std::memory_order_relaxed);
 }
 
 bool OutfitLockManager::HasDefaultOutfit(RE::Actor* actor) const
@@ -765,6 +1198,7 @@ void OutfitLockManager::OnPreLoad()
 
     mgr->m_outfits.clear();
     mgr->m_playerGivenItems.clear();
+    mgr->RefreshLockedCount();
 
     spdlog::info("OutfitLockManager::OnPreLoad - Cleared state");
 }
@@ -866,6 +1300,8 @@ void OutfitLockManager::OnLoadRecord(SKSE::SerializationInterface* a_intfc,
                 spdlog::info("  - Loaded outfit '{}' for actor 0x{:08X} with {} items",
                     outfitName, newActorID, validCount);
             }
+
+            mgr->RefreshLockedCount();
         }
         else if (type == kPlayerItemsRecord) {
             // Read number of actors
@@ -951,6 +1387,23 @@ void OutfitLockManager::OnRevert(SKSE::SerializationInterface*)
     mgr->m_outfits.clear();
     mgr->m_playerGivenItems.clear();
     mgr->m_gallerySpawnedItems.clear();
+    mgr->m_hasGalleryItems.store(false, std::memory_order_relaxed);
+    mgr->RefreshLockedCount();
+
+    // Rate and debounce state is keyed on runtime ref IDs, which mean nothing across a
+    // revert. Left in place they would suppress a reapply for whoever inherits the ID.
+    {
+        std::lock_guard<std::mutex> rateLock(mgr->m_equipRateMutex);
+        mgr->m_equipRate.clear();
+    }
+    {
+        std::lock_guard<std::mutex> applyLock(mgr->m_lastApplyMutex);
+        mgr->m_lastApplyMs.clear();
+    }
+    {
+        std::lock_guard<std::mutex> reapplyLock(mgr->m_reapplyMutex);
+        mgr->m_reapply.clear();
+    }
 }
 
 void OutfitLockManager::OnPostLoadGame()
@@ -1008,8 +1461,10 @@ void OutfitLockManager::ApplyLockedOutfitsInLocation(RE::BGSLocation* location)
                 continue;
             }
 
-            // If no location specified, just apply to all locked actors that are loaded
-            if (!location && !actor->Is3DLoaded()) {
+            // Dressing an actor whose 3D is not loaded still costs the full equip fan-out
+            // in every listening mod, and the result is invisible until they load anyway.
+            // Previously only checked when no location was given.
+            if (!actor->Is3DLoaded()) {
                 spdlog::trace("  - Actor '{}' is not 3D loaded", actor->GetName());
                 continue;
             }
@@ -1020,14 +1475,38 @@ void OutfitLockManager::ApplyLockedOutfitsInLocation(RE::BGSLocation* location)
         }
     }  // Lock released here
 
+    const std::int64_t now = NowMs();
+
     // Apply outfits outside the lock to avoid deadlock
     for (auto* actor : actorsToProcess) {
+        const RE::FormID actorID = actor->GetFormID();
+
+        // Location changes arrive in bursts - a door transition can fire several, and
+        // fast travel more - and a full reapply per event is how two locked followers
+        // turn into a few dozen equip events for no visible change.
+        {
+            std::lock_guard<std::mutex> lock(m_lastApplyMutex);
+            const auto it = m_lastApplyMs.find(actorID);
+            if (it != m_lastApplyMs.end() && now - it->second < kLocationDebounceMs) {
+                spdlog::trace("  - '{}' reapplied {}ms ago, skipping (debounce)",
+                    actor->GetName(), now - it->second);
+                continue;
+            }
+        }
+
+        // Someone else is already cycling this actor's equipment. Adding our own
+        // unequip/equip traffic on top only feeds the Papyrus stack pile-up.
+        if (IsInEquipBackoff(actorID)) {
+            spdlog::warn("  - '{}' is in equip-storm backoff, not reapplying", actor->GetName());
+            continue;
+        }
+
         // Under SeverActions the unequip half of this would trip its alias debounce
         // and have it re-dress the NPC on top of us. Its own apply path brackets
         // itself the same way.
         SeverActionsCompat::SuspendLock(actor);
         ApplyOutfit(actor, "locked", true);
-        SeverActionsCompat::ResumeLock(actor);
+        SeverActionsCompat::ResumeLockAfterMs(actor, SeverActionsCompat::kEquipSettleMs);
     }
 }
 
@@ -1131,6 +1610,7 @@ std::uint32_t OutfitLockManager::SetOutfitFromFormKeys(RE::Actor* actor,
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_outfits[OutfitKey{actor->GetFormID(), outfitName}] = std::move(outfit);
+        RefreshLockedCount();
     }
 
     spdlog::info("SetOutfitFromFormKeys - '{}' for 0x{:08X}: {}/{} key(s) accepted",
@@ -1181,7 +1661,7 @@ std::uint32_t OutfitLockManager::EnsureOutfitItemsInInventory(RE::Actor* actor,
     for (const auto& formKey : keys) {
         auto* armor = RE::TESForm::LookupByID<RE::TESObjectARMO>(
             Persistence::FormKeyUtil::ResolveToRuntimeFormID(formKey));
-        if (!armor) {
+        if (!armor || ItemEquipHelper::IsBodyPart(armor)) {
             continue;
         }
         const auto counts = actor->GetInventoryCounts();

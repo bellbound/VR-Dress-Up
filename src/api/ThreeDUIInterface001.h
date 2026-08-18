@@ -382,6 +382,10 @@ struct Element : Positionable {
     // Optional secondary model rendered at same position (e.g., for glow effects, panels)
     // Background is non-interactive and follows primary's visibility lifecycle
     virtual void SetBackgroundModel(const char* nifPath) = 0;
+    // Absolute size of the backdrop, in the same units as the element's own scale. It does
+    // not pick up the fit correction an element with a formID derives from its model's
+    // bounds, so one value gives one size behind every element in a row no matter how
+    // large or small the models in front of them are.
     virtual void SetBackgroundScale(float scale) = 0;
     virtual void ClearBackground() = 0;
 
@@ -398,8 +402,28 @@ struct Element : Positionable {
     virtual void SetLabelOffset(float x, float y, float z) = 0;
     virtual void ClearLabelText() = 0;
 
+    // === Background Tint ===
+    // Colour the background model, so one backdrop mesh can serve every element in a
+    // different colour.
+    //   r, g, b  replace the mesh's authored base colour. The mesh's own shading -
+    //            vertex-colour gradients, edge falloff - still modulates them, so the
+    //            backdrop keeps its shape and only changes hue.
+    //   a        overall opacity, 1.0 = as authored.
+    //   glow     emissive strength, set absolutely. Values above 1 push the bright
+    //            parts past 1.0 and into the game's bloom. Pass 0 to leave the mesh's
+    //            authored strength alone, which is what a caller who only wants a hue
+    //            should do (gradient-background-sphere.nif authors 2.4).
+    //
+    // Only a mesh whose material is a BSEffectShaderProperty can be coloured - that is
+    // where the base colour lives. meshes\3DUI\gradient-background-sphere.nif is one;
+    // the older cloud-background-sphere.nif uses a BSLightingShaderProperty and
+    // silently ignores this call.
+    //
+    // Call it after SetBackgroundModel. The colour is remembered and re-applied every
+    // time the background respawns, so it survives hide/show and scroll recycling.
+    virtual void SetBackgroundColor(float r, float g, float b, float a, float glow) = 0;
+
     // === Reserved for future expansion ===
-    virtual void _element_reserved1() {}
     virtual void _element_reserved2() {}
     virtual void _element_reserved3() {}
     virtual void _element_reserved4() {}
@@ -508,8 +532,14 @@ struct ScrollableContainer : Container {
     // - horizontalOrigin: Left/Center/Right - which horizontal edge/center is at X=0
     virtual void SetOrigin(VerticalOrigin verticalOrigin, HorizontalOrigin horizontalOrigin) = 0;
 
+    // === Visible Extent ===
+    // Size of the visible window along the scroll axis, in game units: the
+    // height for a RowGrid, the width for a ColumnGrid. Content beyond it is
+    // hidden and reachable by scrolling. Overrides the value the grid was
+    // created with, so one grid can be resized as its contents change.
+    virtual void SetVisibleExtent(float extent) = 0;
+
     // === Reserved for future expansion ===
-    virtual void _scrollable_reserved1() {}
     virtual void _scrollable_reserved2() {}
     virtual void _scrollable_reserved3() {}
     virtual void _scrollable_reserved4() {}
@@ -585,16 +615,66 @@ struct Root : Container {
 // Interface version for compatibility checking
 // Format: Major * 1000000 + Minor * 10000 + Patch * 100 + Build
 //
+// Which lane to bump:
+// - PATCH for a purely additive change: a reserved vtable slot consumed in place,
+//   or a config struct grown behind its structSize guard. Old consumers keep
+//   working against the new provider, because every vtable index they know about
+//   is unchanged and they never call the new slot.
+// - MINOR for a genuinely breaking change: a signature change, a reordered or
+//   removed method, or a struct layout change. Old consumers must be rebuilt.
+//
 // Version Compatibility Rules:
-// - Pre-1.0.0 (version < 1000000): Major AND minor must match exactly.
-//   Example: 0.10.1.0 and 0.10.0.0 are compatible, 0.10.x and 0.9.x are NOT.
+// - Pre-1.0.0 (version < 1000000): Major AND minor must match exactly, and the
+//   provider's patch must be >= the consumer's expected patch. A consumer that
+//   calls a method added in patch N therefore refuses a provider older than N,
+//   while a consumer built before N still accepts the newer provider.
 // - Post-1.0.0 (version >= 1000000): Backwards compatible within same major.
 //   Provider minor version must be >= consumer expected minor.
 //   Only major version changes break compatibility.
+//
+// 0.10.1.0 added Container::RemoveChild in the _container_reserved1 slot. That is
+// additive, so it is a patch bump: every consumer built against 0.10.0.0 keeps
+// working against it without a rebuild.
+//
+// 0.10.3.0 adds the mesh preflight check. Nothing in this header moved - no slot
+// consumed, no struct grown - so it is a patch bump for the same reason: consumers
+// built against any 0.10.x keep working untouched. The number moves anyway so the
+// release is distinguishable in MO2 and on Nexus.
+//
+// 0.10.4.0 added ScrollableContainer::SetVisibleExtent in the _scrollable_reserved1
+// slot - additive, so a patch bump on the same grounds as 0.10.1.0. The same
+// release also made Element/Text::SetScale apply the same internal multiplier
+// their config counterpart does (0.25 for elements, 1.25 for text). That is a
+// behaviour fix, not a signature change, but a consumer that was built against
+// an older header and calls SetScale draws those elements at a quarter of the
+// size it used to until its own scale constants are rescaled.
+//
+// 0.10.5.0 added Element::SetBackgroundColor in the _element_reserved1 slot -
+// additive, so a patch bump on the same grounds as 0.10.1.0. It only does anything
+// for a backdrop mesh built on a BSEffectShaderProperty; the same release ships
+// meshes\3DUI\gradient-background-sphere.nif as the tintable backdrop.
+//
+// 0.10.6.0 changed nothing in this header. A background model no longer inherits the fit
+// correction 3DUI derives from the element's own mesh bounds, so SetBackgroundScale now
+// means the same size behind every element in a row rather than a size that moved with
+// whatever model happened to be in front of it. A consumer that had tuned its backdrop
+// scale against one particular model's correction will see that backdrop change size.
+//
+// 0.10.7.0 changed nothing in this header either. An element's model is now centred on the
+// element: the offset between a mesh's geometry and its own origin is measured from the
+// loaded model bounds and taken back out, so an armour record whose world model points at a
+// worn `..._0.nif` no longer draws a metre up in the air. The element's logical position -
+// what SetLocalPosition set and what interaction tests against - is unchanged.
+//
+// 0.10.8.0 changed nothing in this header either. Element::SetTexture now takes effect on
+// an element that is already on screen. It only ever updated the library's own copy of the
+// path before, so the icon went on rendering whatever it was created with until something
+// destroyed and rebuilt it, and a consumer swapping an icon between two states - a stepper
+// walking a list, a toggle button - saw nothing change.
 constexpr uint32_t P3DUI_INTERFACE_VERSION =
     0 * 1000000 +
     10 * 10000 +
-    0 * 100 +
+    8 * 100 +
     0;
 
 struct Interface001 {

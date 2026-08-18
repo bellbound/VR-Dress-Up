@@ -16,6 +16,8 @@ Core Features
   ✦ Category mode gathers every mod's boots, wigs, capes and more into one row
   ✦ Categories are plain JSON files, so you can retune them or add your own
   ✦ Lock outfits so NPCs maintain their look across location changes and saves
+  ✦ Locked NPCs are re-dressed automatically if another mod undresses them, and DressUp
+    stands down on its own if that other mod turns out to be fighting back
   ✦ Quick undress button with partial and full options
   ✦ Restore original outfit at any time
 

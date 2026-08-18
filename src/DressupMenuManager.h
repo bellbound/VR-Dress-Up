@@ -29,6 +29,66 @@ inline std::wstring ToWide(const std::string& str) {
     return ToWide(str.c_str());
 }
 
+// The plate an element sits on. The gradient sphere replaces the older cloud one because
+// its material is a BSEffectShaderProperty, which is the only kind 3DUI can tint - the
+// cloud mesh is a lighting-shader mesh and silently ignored SetBackgroundColor.
+namespace Backdrop
+{
+    constexpr const char* kModel = "meshes\\3DUI\\gradient-background-sphere.nif";
+
+    // Scales are absolute since 3DUI 0.10.6: the backdrop no longer inherits the fit
+    // correction the element derives from its preview model's bounds, so one value is one
+    // size for a whole row instead of one size per model. A unit sphere at scale S comes
+    // out S/2 units across, so each of these is set just inside its row's spacing - a
+    // backdrop wider than the gap between two elements reads as one smeared plate.
+    constexpr float kCategoryScale = 20.0f;  // gallery row, 12.0 column spacing
+    constexpr float kItemScale     = 14.0f;  // item spiral, 8.0 item spacing
+
+    // rgb is the hue, a the opacity, glow the emissive strength. The mesh authors a bright
+    // blue (0.24, 0.78, 1.0) at glow 2.4, which is far too loud for a whole row of plates,
+    // so everything here is read against that rather than against a flat sRGB swatch.
+    struct Tint
+    {
+        float r, g, b, a, glow;
+    };
+
+    // A category nobody has picked: the near-grey the skin overlay menu rests its pack
+    // covers on, there to give the artwork an edge to sit against rather than to say
+    // "pick me".
+    constexpr Tint kCategoryIdle = {0.55f, 0.62f, 0.72f, 1.00f, 1.00f};
+
+    // The category the spiral is currently showing. One step up in the same direction
+    // rather than a different colour: the hue commits to the mesh's blue and the glow
+    // roughly doubles, which is enough to pick it out of the row at a glance without the
+    // row turning into a light show.
+    constexpr Tint kCategorySelected = {0.45f, 0.68f, 1.00f, 1.00f, 1.90f};
+
+    // Every item in the wheel. Same blue, but mostly transparent and barely glowing: there
+    // are dozens of these at once and their job is to give each item a disc to read
+    // against, not to compete with the item or with the gallery row below.
+    constexpr Tint kItem = {0.40f, 0.60f, 1.00f, 0.35f, 0.45f};
+
+    // The one place that puts a backdrop on an element, so every row agrees about which
+    // mesh it is.
+    inline void Apply(P3DUI::Element* element, float scale, const Tint& tint)
+    {
+        if (!element) return;
+        element->SetBackgroundModel(kModel);
+        element->SetBackgroundScale(scale);
+        element->SetBackgroundColor(tint.r, tint.g, tint.b, tint.a, tint.glow);
+    }
+
+    inline void ApplyCategory(P3DUI::Element* element, bool selected)
+    {
+        Apply(element, kCategoryScale, selected ? kCategorySelected : kCategoryIdle);
+    }
+
+    inline void ApplyItem(P3DUI::Element* element)
+    {
+        Apply(element, kItemScale, kItem);
+    }
+}
+
 // What the shared row below the wheel is currently showing. Only one at a time.
 enum class GalleryMode : std::uint8_t
 {
@@ -117,7 +177,7 @@ public:
 
         // === Create Handle Row (using ColumnGrid with single row) ===
         P3DUI::ColumnGridConfig handleRowConfig = P3DUI::ColumnGridConfig::Default("handle_row");
-        handleRowConfig.columnSpacing = 10.0f;
+        handleRowConfig.columnSpacing = 7.5f;   // 0.75x the original 10.0 - the tool row reads as one group
         handleRowConfig.numRows = 1;
         handleRowConfig.visibleWidth = 1000.0f;  // Large enough to show all items without scrolling
 
@@ -131,7 +191,7 @@ public:
         // === Create Gallery Row (ColumnGrid for mod/keyword categories - horizontal scrolling) ===
         P3DUI::ColumnGridConfig galleryConfig = P3DUI::ColumnGridConfig::Default("gallery_row");
         galleryConfig.columnSpacing = 12.0f;
-        galleryConfig.visibleWidth = 40.0f;
+        galleryConfig.visibleWidth = 48.0f;   // +20% over the original 40.0; both gallery modes share this row
         galleryConfig.numRows = 1;
 
         m_galleryRow = m_api->CreateColumnGrid(galleryConfig);
@@ -578,6 +638,7 @@ private:
 
             auto* item = m_api->CreateElement(itemConfig);
             if (item) {
+                Backdrop::ApplyItem(item);
                 m_itemSpiral->AddChild(item);
             }
         }
@@ -591,6 +652,11 @@ private:
         m_galleryArmorList = !m_activeModCategory.empty()
             ? ArmorModManager::GetSingleton()->GetArmorForMod(m_activeModCategory)
             : KeywordCategoryManager::GetSingleton()->GetItemsForCategory(m_activeKeywordCategory);
+
+        // The categories are cached once for the whole game, so the actor being dressed is
+        // applied here. Same filter the count on the category icon was narrowed by, so the
+        // spiral holds exactly as many items as the icon promised.
+        NarrowToTarget(m_galleryArmorList);
 
         // Sort alphabetically by name (gallery mode only - inventory uses game order)
         std::sort(m_galleryArmorList.begin(), m_galleryArmorList.end(),
@@ -618,6 +684,7 @@ private:
 
             auto* item = m_api->CreateElement(itemConfig);
             if (item) {
+                Backdrop::ApplyItem(item);
                 m_itemSpiral->AddChild(item);
             }
         }
@@ -764,6 +831,7 @@ private:
         if (mode == GalleryMode::None) {
             if (m_galleryRow) {
                 m_galleryRow->Clear();
+                m_categoryElements.clear();
                 m_galleryRow->SetVisible(false);
             }
         } else {
@@ -823,6 +891,7 @@ private:
         if (!IsMenuOpen() || !m_galleryRow || !m_api || m_galleryMode == GalleryMode::None) return;
 
         m_galleryRow->Clear();
+        m_categoryElements.clear();
 
         bool showingMods = (m_galleryMode == GalleryMode::Mods);
 
@@ -859,6 +928,90 @@ private:
         m_galleryRow->ResetScroll();
     }
 
+    // Which entry of the gallery row the spiral is currently showing, or -1 for none.
+    // Answered from the active category name rather than a stored index, so it survives the
+    // row being narrowed to a different actor and rebuilt underneath.
+    int ActiveCategoryIndex() const
+    {
+        if (m_galleryMode == GalleryMode::Mods && !m_activeModCategory.empty()) {
+            for (size_t i = 0; i < m_categoryList.size(); ++i) {
+                if (m_categoryList[i].modName == m_activeModCategory) return static_cast<int>(i);
+            }
+        } else if (m_galleryMode == GalleryMode::Keywords && !m_activeKeywordCategory.empty()) {
+            for (size_t i = 0; i < m_keywordCategoryList.size(); ++i) {
+                if (m_keywordCategoryList[i].name == m_activeKeywordCategory) return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
+    // Re-tint the gallery row so the category the spiral is showing wears the brighter
+    // backdrop. Retints the live elements rather than rebuilding the row: rebuilding would
+    // reset the scroll position, which on a long mod list throws away the place the player
+    // scrolled to in order to make the selection.
+    void RefreshCategoryHighlight()
+    {
+        const int active = ActiveCategoryIndex();
+
+        for (size_t i = 0; i < m_categoryElements.size(); ++i) {
+            Backdrop::ApplyCategory(m_categoryElements[i], static_cast<int>(i) == active);
+        }
+    }
+
+    // Drop from a category's item list everything the actor being dressed has no mesh for.
+    void NarrowToTarget(std::vector<RE::TESObjectARMO*>& items) const
+    {
+        RE::Actor* target = GetCurrentTargetActor();
+        if (!target) return;
+
+        std::erase_if(items, [target](RE::TESObjectARMO* armor) {
+            return !ItemEquipHelper::FitsActor(armor, target);
+        });
+    }
+
+    // Narrow a row of cached categories to the actor being dressed: a category with nothing
+    // this actor can wear is dropped outright, one that keeps only some of its items has its
+    // count corrected, and one whose cached icon is gear this actor cannot wear gets a new
+    // icon from what is left. Otherwise a male NPC gets a Wigs category showing a wig and
+    // promising forty items, and selecting it draws an empty spiral.
+    //
+    // Dropping has to happen here, before the row is built - the element id carries its index
+    // into m_categoryList / m_keywordCategoryList, so skipping an element inside the loop
+    // instead would slide every later category's index onto the wrong entry.
+    template <typename CategoryInfo, typename ItemsFor, typename Representative>
+    void NarrowCategoriesToTarget(std::vector<CategoryInfo>& categories, ItemsFor itemsFor,
+        Representative representative) const
+    {
+        RE::Actor* target = GetCurrentTargetActor();
+        if (!target) return;
+
+        std::vector<CategoryInfo> kept;
+        kept.reserve(categories.size());
+
+        for (CategoryInfo category : categories) {
+            auto items = itemsFor(category);
+            NarrowToTarget(items);
+            if (items.empty()) continue;
+
+            category.itemCount = items.size();
+
+            RE::TESObjectARMO*& icon = representative(category);
+            if (!ItemEquipHelper::FitsActor(icon, target)) {
+                icon = items.front();
+            }
+
+            kept.push_back(std::move(category));
+        }
+
+        if (kept.size() != categories.size()) {
+            spdlog::info("DressupMenuManager::NarrowCategoriesToTarget - {} of {} categories have "
+                "nothing {} can wear",
+                categories.size() - kept.size(), categories.size(), target->GetName());
+        }
+
+        categories = std::move(kept);
+    }
+
     // Fill the gallery row with one entry per installed mod
     void PopulateModCategories()
     {
@@ -866,6 +1019,13 @@ private:
 
         // Get sorted categories from ArmorModManager
         m_categoryList = armorModMgr->GetSortedCategories();
+        NarrowCategoriesToTarget(m_categoryList,
+            [armorModMgr](const ModCategoryInfo& category) {
+                return armorModMgr->GetArmorForMod(category.modName);
+            },
+            [](ModCategoryInfo& category) -> RE::TESObjectARMO*& {
+                return category.representativeArmor;
+            });
 
         // Trace log: gallery mods summary
         auto* galleryState = GalleryStateManager::GetSingleton();
@@ -907,12 +1067,12 @@ private:
 
             auto* catElement = m_api->CreateElement(catConfig);
             if (catElement) {
-                // Add background sphere for visual highlight
-                catElement->SetBackgroundModel("meshes\\3DUI\\cloud-background-sphere.nif");
-                catElement->SetBackgroundScale(20.0f);
+                m_categoryElements.push_back(catElement);
                 m_galleryRow->AddChild(catElement);
             }
         }
+
+        RefreshCategoryHighlight();
 
         spdlog::info("DressupMenuManager::PopulateModCategories - Populated with {} mods", m_categoryList.size());
     }
@@ -920,7 +1080,15 @@ private:
     // Fill the gallery row with one entry per keyword category
     void PopulateKeywordCategories()
     {
-        m_keywordCategoryList = KeywordCategoryManager::GetSingleton()->GetSortedCategories();
+        auto* keywordMgr = KeywordCategoryManager::GetSingleton();
+        m_keywordCategoryList = keywordMgr->GetSortedCategories();
+        NarrowCategoriesToTarget(m_keywordCategoryList,
+            [keywordMgr](const KeywordCategoryInfo& category) {
+                return keywordMgr->GetItemsForCategory(category.name);
+            },
+            [](KeywordCategoryInfo& category) -> RE::TESObjectARMO*& {
+                return category.representative;
+            });
 
         for (size_t i = 0; i < m_keywordCategoryList.size(); ++i) {
             const auto& category = m_keywordCategoryList[i];
@@ -944,12 +1112,12 @@ private:
 
             auto* catElement = m_api->CreateElement(catConfig);
             if (catElement) {
-                // Add background sphere for visual highlight
-                catElement->SetBackgroundModel("meshes\\3DUI\\cloud-background-sphere.nif");
-                catElement->SetBackgroundScale(20.0f);
+                m_categoryElements.push_back(catElement);
                 m_galleryRow->AddChild(catElement);
             }
         }
+
+        RefreshCategoryHighlight();
 
         spdlog::info("DressupMenuManager::PopulateKeywordCategories - Populated with {} categories",
             m_keywordCategoryList.size());
@@ -970,6 +1138,7 @@ private:
         spdlog::info("DressupMenuManager::OnKeywordCategorySelected - Selected '{}' ({} items)",
             category.name, category.itemCount);
 
+        RefreshCategoryHighlight();
         RefreshItemSpiral();
         UpdateInfoText();
     }
@@ -988,6 +1157,8 @@ private:
 
         spdlog::info("DressupMenuManager::OnCategorySelected - Selected mod '{}' ({} items)",
             category.modName, category.itemCount);
+
+        RefreshCategoryHighlight();
 
         // Mark this mod as interacted with (for future ordering)
         GalleryStateManager::GetSingleton()->PushModToFront(category.modName);
@@ -1025,6 +1196,7 @@ public:
         m_galleryArmorList.clear();
         m_categoryList.clear();
         m_keywordCategoryList.clear();
+        m_categoryElements.clear();
         if (m_galleryRow) {
             m_galleryRow->SetVisible(false);
         }
@@ -1196,6 +1368,11 @@ private:
     std::string m_activeModCategory;                     // Selected mod (empty = none)
     std::string m_activeKeywordCategory;                 // Selected keyword category (empty = none)
     std::vector<RE::TESObjectARMO*> m_galleryArmorList;  // Items shown for the selected category
+    // The gallery row's live elements, in the same order as the category list below. Kept
+    // so the selection highlight can be re-tinted in place; cleared whenever the row is,
+    // because Clear() destroys the elements these point at.
+    std::vector<P3DUI::Element*> m_categoryElements;
+
     std::vector<ModCategoryInfo> m_categoryList;         // Mods currently in the gallery row
     std::vector<KeywordCategoryInfo> m_keywordCategoryList;  // Keyword categories currently in the gallery row
 

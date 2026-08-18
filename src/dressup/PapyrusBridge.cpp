@@ -35,6 +35,29 @@ namespace PapyrusBridge
             IntResult m_fn;
         };
 
+        // Same, for a Bool return.
+        class BoolCallback : public RE::BSScript::IStackCallbackFunctor
+        {
+        public:
+            explicit BoolCallback(BoolResult fn) : m_fn(std::move(fn)) {}
+
+            void operator()(RE::BSScript::Variable a_result) override
+            {
+                if (!m_fn) return;
+                if (a_result.IsBool()) {
+                    m_fn(true, a_result.GetBool());
+                } else {
+                    m_fn(false, false);
+                }
+            }
+
+            bool CanSave() const override { return false; }
+            void SetObject(const RE::BSTSmartPointer<RE::BSScript::Object>&) override {}
+
+        private:
+            BoolResult m_fn;
+        };
+
         // Same, for a call whose return value is a form.
         class FormCallback : public RE::BSScript::IStackCallbackFunctor
         {
@@ -149,6 +172,20 @@ namespace PapyrusBridge
         return ok;
     }
 
+    bool CallGlobalBool(const char* className, const char* fnName,
+                        RE::BSScript::IFunctionArguments* args, BoolResult result)
+    {
+        auto* vm = GetVM();
+        if (!vm) return false;
+
+        RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> callback(new BoolCallback(std::move(result)));
+        const bool ok = vm->DispatchStaticCall(className, fnName, args, callback);
+        if (!ok) {
+            spdlog::warn("PapyrusBridge::CallGlobalBool - {}.{} dispatch failed", className, fnName);
+        }
+        return ok;
+    }
+
     bool CallMethodInt(RE::TESForm* target, RE::FormType targetType,
                        const char* scriptName, const char* fnName,
                        RE::BSScript::IFunctionArguments* args, IntResult result)
@@ -176,6 +213,66 @@ namespace PapyrusBridge
             spdlog::warn("PapyrusBridge::CallMethodInt - {}.{} dispatch failed", scriptName, fnName);
         }
         return ok;
+    }
+
+    bool CallMethod(RE::TESForm* target, RE::FormType targetType,
+                    const char* scriptName, const char* fnName,
+                    RE::BSScript::IFunctionArguments* args)
+    {
+        if (!target) {
+            spdlog::error("PapyrusBridge::CallMethod - Null target for {}.{}", scriptName, fnName);
+            return false;
+        }
+
+        auto* vm = GetVM();
+        if (!vm) return false;
+
+        auto* policy = vm->GetObjectHandlePolicy();
+        if (!policy) return false;
+
+        const auto handle = policy->GetHandleForObject(static_cast<RE::VMTypeID>(targetType), target);
+        if (handle == policy->EmptyHandle()) {
+            spdlog::warn("PapyrusBridge::CallMethod - No VM handle for {}.{}", scriptName, fnName);
+            return false;
+        }
+
+        auto callback = NullCallback();
+        const bool ok = vm->DispatchMethodCall(handle, scriptName, fnName, args, callback);
+        if (!ok) {
+            spdlog::warn("PapyrusBridge::CallMethod - {}.{} dispatch failed", scriptName, fnName);
+        }
+        return ok;
+    }
+
+    RE::TESQuest* FindQuestWithScript(const char* scriptName)
+    {
+        if (!scriptName || !*scriptName) return nullptr;
+
+        auto* vm = GetVM();
+        if (!vm) return nullptr;
+
+        auto* policy = vm->GetObjectHandlePolicy();
+        if (!policy) return nullptr;
+
+        auto* dataHandler = RE::TESDataHandler::GetSingleton();
+        if (!dataHandler) return nullptr;
+
+        const auto questType = static_cast<RE::VMTypeID>(RE::FormType::Quest);
+
+        for (auto* form : dataHandler->GetFormArray<RE::TESQuest>()) {
+            auto* quest = form ? form->As<RE::TESQuest>() : nullptr;
+            if (!quest) continue;
+
+            const auto handle = policy->GetHandleForObject(questType, quest);
+            if (handle == policy->EmptyHandle()) continue;
+
+            RE::BSTSmartPointer<RE::BSScript::Object> object;
+            if (vm->FindBoundObject(handle, scriptName, object) && object) {
+                return quest;
+            }
+        }
+
+        return nullptr;
     }
 
     bool CallGlobalForm(const char* className, const char* fnName, RE::FormType formType,

@@ -1,11 +1,15 @@
 #pragma once
 
 #include <RE/Skyrim.h>
+#include <chrono>
+#include <mutex>
+#include <unordered_map>
 #include <vector>
 #include <string>
 // Spelled relative to this file, not to whoever includes it: a .cpp in this folder has no
 // src/ in its include chain, so a bare "log.h" only resolves for includers up in src/.
 #include "../log.h"
+#include "DeviceCompat.h"
 
 // Helper namespace for unified armor/weapon equipment operations
 namespace ItemEquipHelper
@@ -75,6 +79,50 @@ namespace ItemEquipHelper
         return modelPath ? modelPath : "";
     }
 
+    // Whether this armour has a mesh to render on a body of the given sex.
+    //
+    // Not the ARMO's own world models - those are the ground model, what the item looks
+    // like lying on a table. What a worn armour actually renders comes from its armour
+    // addons, each of which carries a male and a female mesh, and female-only gear - wigs,
+    // lingerie - leaves the male field of every one of them empty.
+    inline bool HasWornMeshForSex(RE::TESObjectARMO* armor, RE::SEX sex)
+    {
+        if (!armor) return false;
+
+        const auto slot = (sex == RE::SEXES::kFemale) ? RE::SEXES::kFemale : RE::SEXES::kMale;
+        for (auto* addon : armor->armorAddons) {
+            if (!addon) continue;
+            const char* model = addon->bipedModels[slot].GetModel();
+            if (model && *model) return true;
+        }
+        return false;
+    }
+
+    // Whether this armour is worth offering for a particular actor. Female-only gear put on
+    // a man occupies the biped slot and draws nothing - he ends up "wearing" a wig that is
+    // not there, and the category it came from counts it and then looks broken.
+    //
+    // Deliberately one-way: it only ever hides gear from a male actor. The engine falls back
+    // to an addon's male mesh when the female one is empty, but not the other way round, so
+    // the very many mod armours that fill only the male slot do render on women and hiding
+    // them there would throw away most of the wardrobe. Only the male direction is a hole.
+    //
+    // An armour with no mesh for either sex is NOT hidden either. That one is broken for
+    // everybody, so hiding it from one actor and not the next would be the more confusing
+    // answer; GetModelPath's fallback and the category build already drop the ones that
+    // have nothing to draw at all.
+    inline bool FitsActor(RE::TESObjectARMO* armor, RE::Actor* actor)
+    {
+        if (!armor) return false;
+        if (!actor) return true;
+
+        auto* base = actor->GetActorBase();
+        if (!base || base->IsFemale()) return true;
+
+        if (HasWornMeshForSex(armor, RE::SEXES::kMale)) return true;
+        return !HasWornMeshForSex(armor, RE::SEXES::kFemale);
+    }
+
     // Biped slot 52 is where The New Gentleman - and SOS before it - puts its genital
     // addons. Those are body parts rather than clothing: TNG equips and unequips them
     // itself in reaction to what the NPC is wearing, so anything we do with them is
@@ -92,13 +140,40 @@ namespace ItemEquipHelper
         return (static_cast<std::uint32_t>(armor->GetSlotMask()) & kBodyPartSlots) != 0;
     }
 
-    // Check if armor is equipped in its slot
+    // Is this exact item worn?
+    //
+    // Asked of the item's own inventory entry rather than through
+    // Actor::GetWornArmor(slotMask), which answers "what is worn in these slots" and only
+    // then compares. That indirection got two cases wrong:
+    //
+    //   * items with no biped slot at all answer no forever, because the slot query
+    //     matches on slot bits and there are none to match. Every Devious Devices
+    //     inventory device is such an item (BOD2 = 0), so a worn device read as not worn
+    //     and got re-equipped on every outfit reapply.
+    //   * where two worn items share a slot, the query returns whichever comes first in
+    //     the entry list, so the other one reads as not worn.
+    //
+    // The worn flag lives on the entry's extra data, which is where the engine actually
+    // records it, and is right for both.
     inline bool IsArmorEquipped(RE::Actor* actor, RE::TESObjectARMO* armor)
     {
         if (!actor || !armor) return false;
-        auto slotMask = armor->GetSlotMask();
-        auto* wornArmor = actor->GetWornArmor(slotMask);
-        return wornArmor && wornArmor->GetFormID() == armor->GetFormID();
+
+        auto* changes = actor->GetInventoryChanges();
+        if (!changes || !changes->entryList) {
+            // No inventory changes yet - nothing has been equipped or moved on this
+            // actor, so the base outfit is all there is. Fall back to the slot query.
+            auto* wornArmor = actor->GetWornArmor(armor->GetSlotMask());
+            return wornArmor && wornArmor->GetFormID() == armor->GetFormID();
+        }
+
+        const auto formID = armor->GetFormID();
+        for (auto* entry : *changes->entryList) {
+            if (!entry || !entry->object || entry->object->GetFormID() != formID) continue;
+            return entry->IsWorn();
+        }
+
+        return false;
     }
 
     // Check if weapon is equipped (in either hand)
@@ -156,6 +231,113 @@ namespace ItemEquipHelper
         return result;
     }
 
+    // === Queued equips ===
+    //
+    // Every equip here goes out with a_queueEquip = true, so the engine does not apply it in
+    // the call: it lands a frame or more later, and until it does the actor's inventory
+    // changes still say the item is not worn. Unequips pass false and take effect at once,
+    // which is why the asymmetry only ever bites on the way in.
+    //
+    // So anything that snapshots what an actor is wearing in the same breath as dressing
+    // them misses the piece it just put on. That is how the outfit lock came to strip a
+    // freshly equipped item: the re-save that runs when the edit scope closes did not
+    // contain it, and the reapply 750ms later found a piece that was not in the outfit and
+    // took it off again. Verified in the log against Sybille Stentor and a Bandolier - the
+    // save immediately after the equip listed 5 items, none of them the bandolier, and
+    // UnequipArmorExcept removed it 782ms later.
+    //
+    // The intent is therefore recorded here, at the one place that issues the equip, for
+    // readers that want "what is this actor going to be wearing" rather than "what is the
+    // engine showing this instant".
+    namespace Pending
+    {
+        // Long enough for a queued equip to reach the actor even on a loaded frame, short
+        // enough that an equip which never lands cannot pin a stale item into an outfit.
+        constexpr auto kLifetime = std::chrono::seconds(5);
+
+        using Clock = std::chrono::steady_clock;
+
+        struct Registry
+        {
+            std::mutex mutex;
+            std::unordered_map<RE::FormID, std::unordered_map<RE::FormID, Clock::time_point>> byActor;
+        };
+
+        inline Registry& Get()
+        {
+            static Registry registry;
+            return registry;
+        }
+    }
+
+    // Record that we have asked the engine to put this armour on. Any earlier pending item
+    // sharing a biped slot with it is dropped: the engine will have taken that one off to
+    // make room, so keeping both would make a snapshot claim the actor wears two things in
+    // one slot and the reapply fight itself.
+    inline void NotePendingEquip(RE::Actor* actor, RE::TESObjectARMO* armor)
+    {
+        if (!actor || !armor) return;
+
+        const auto slots = static_cast<std::uint32_t>(armor->GetSlotMask());
+
+        auto& registry = Pending::Get();
+        std::lock_guard<std::mutex> lock(registry.mutex);
+        auto& items = registry.byActor[actor->GetFormID()];
+
+        for (auto it = items.begin(); it != items.end();) {
+            auto* other = RE::TESForm::LookupByID<RE::TESObjectARMO>(it->first);
+            const bool overlaps = other &&
+                (static_cast<std::uint32_t>(other->GetSlotMask()) & slots) != 0;
+            it = (!other || overlaps) ? items.erase(it) : std::next(it);
+        }
+
+        items[armor->GetFormID()] = Pending::Clock::now();
+    }
+
+    inline void ClearPendingEquip(RE::Actor* actor, RE::TESObjectARMO* armor)
+    {
+        if (!actor || !armor) return;
+
+        auto& registry = Pending::Get();
+        std::lock_guard<std::mutex> lock(registry.mutex);
+        const auto actorEntry = registry.byActor.find(actor->GetFormID());
+        if (actorEntry != registry.byActor.end()) {
+            actorEntry->second.erase(armor->GetFormID());
+        }
+    }
+
+    // Armour this actor has been told to put on and the engine has not reported yet.
+    // Expired and unresolvable entries are pruned on the way out.
+    inline std::vector<RE::TESObjectARMO*> GetPendingEquips(RE::Actor* actor)
+    {
+        std::vector<RE::TESObjectARMO*> result;
+        if (!actor) return result;
+
+        const auto now = Pending::Clock::now();
+
+        auto& registry = Pending::Get();
+        std::lock_guard<std::mutex> lock(registry.mutex);
+        const auto actorEntry = registry.byActor.find(actor->GetFormID());
+        if (actorEntry == registry.byActor.end()) return result;
+
+        auto& items = actorEntry->second;
+        for (auto it = items.begin(); it != items.end();) {
+            if (now - it->second > Pending::kLifetime) {
+                it = items.erase(it);
+                continue;
+            }
+            auto* armor = RE::TESForm::LookupByID<RE::TESObjectARMO>(it->first);
+            if (!armor) {
+                it = items.erase(it);
+                continue;
+            }
+            result.push_back(armor);
+            ++it;
+        }
+
+        return result;
+    }
+
     // Transfer item from one actor to another
     inline void TransferItem(RE::Actor* from, RE::Actor* to, RE::TESBoundObject* item, int count = 1)
     {
@@ -183,6 +365,56 @@ namespace ItemEquipHelper
         }
     }
 
+    // Put a piece of armour on, using whatever mechanism owns it.
+    //
+    // A Devious Devices inventory device is not equippable by hand: the engine will happily
+    // set the worn flag, but DD's OnEquipped is what pairs it with its rendered half, and
+    // driving it from outside makes DD re-run that whole sequence to repair the mismatch.
+    // Ask DD to lock the device on instead. Rendered devices are never ours to equip at all.
+    inline void EquipArmor(RE::Actor* actor, RE::TESObjectARMO* armor)
+    {
+        if (!actor || !armor) return;
+
+        if (DeviceCompat::IsRenderedDevice(armor)) {
+            spdlog::trace("ItemEquipHelper::EquipArmor - '{}' (0x{:08X}) is a rendered device; "
+                "leaving it to Devious Devices", armor->GetFullName(), armor->GetFormID());
+            return;
+        }
+
+        if (DeviceCompat::IsInventoryDevice(armor)) {
+            DeviceCompat::Equip(actor, armor);
+            NotePendingEquip(actor, armor);
+            return;
+        }
+
+        EquipItem(actor, armor);
+        NotePendingEquip(actor, armor);
+    }
+
+    // Take a piece of armour off. Same reasoning as EquipArmor: a device comes off through
+    // DD's unlock path, which removes the rendered half, stops its effects and fires the
+    // events other mods listen for. Returns false when the item is still on afterwards -
+    // a quest device DD refuses to remove.
+    inline bool UnequipArmor(RE::Actor* actor, RE::TESObjectARMO* armor)
+    {
+        if (!actor || !armor) return false;
+
+        if (DeviceCompat::IsRenderedDevice(armor)) {
+            spdlog::trace("ItemEquipHelper::UnequipArmor - '{}' (0x{:08X}) is a rendered device; "
+                "leaving it to Devious Devices", armor->GetFullName(), armor->GetFormID());
+            return false;
+        }
+
+        ClearPendingEquip(actor, armor);
+
+        if (DeviceCompat::IsInventoryDevice(armor)) {
+            return DeviceCompat::Unequip(actor, armor);
+        }
+
+        UnequipItem(actor, armor);
+        return true;
+    }
+
     // Toggle equip state for armor on actor
     inline bool ToggleArmorEquip(RE::Actor* actor, RE::TESObjectARMO* armor)
     {
@@ -191,11 +423,15 @@ namespace ItemEquipHelper
         bool wasEquipped = IsArmorEquipped(actor, armor);
 
         if (wasEquipped) {
-            UnequipItem(actor, armor);
+            if (!UnequipArmor(actor, armor)) {
+                // Refused - a locked-on quest device, or a rendered half we do not drive.
+                // It is still worn, and saying otherwise would leave the wheel out of sync.
+                return true;
+            }
             spdlog::info("ItemEquipHelper::ToggleArmorEquip - Unequipped '{}' from {}",
                 armor->GetFullName(), actor->GetName());
         } else {
-            EquipItem(actor, armor);
+            EquipArmor(actor, armor);
             spdlog::info("ItemEquipHelper::ToggleArmorEquip - Equipped '{}' on {}",
                 armor->GetFullName(), actor->GetName());
         }

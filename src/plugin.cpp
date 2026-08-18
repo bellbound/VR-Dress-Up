@@ -8,7 +8,9 @@
 #include "dressup/OutfitLockManager.h"
 #include "dressup/OutfitFormBackend.h"
 #include "dressup/SeverActionsCompat.h"
+#include "dressup/DeviceCompat.h"
 #include "dressup/UndressManager.h"
+#include "dressup/WeaponLockManager.h"
 #include "dressup/GalleryStateManager.h"
 #include "dressup/ArmorModManager.h"
 #include "InventoryManager.h"
@@ -24,8 +26,10 @@ namespace SerializationCallbacks
     {
         OutfitLockManager::OnGameSave(a_intfc);
         OutfitFormBackend::OnGameSave(a_intfc);
+        SeverActionsCompat::OnGameSave(a_intfc);
         UndressManager::OnGameSave(a_intfc);
         GalleryStateManager::OnGameSave(a_intfc);
+        WeaponLockManager::OnGameSave(a_intfc);
     }
 
     void OnGameLoad(SKSE::SerializationInterface* a_intfc)
@@ -33,8 +37,10 @@ namespace SerializationCallbacks
         // Clear all managers before processing records
         OutfitLockManager::OnPreLoad();
         OutfitFormBackend::OnPreLoad();
+        SeverActionsCompat::OnPreLoad();
         UndressManager::OnPreLoad();
         GalleryStateManager::OnPreLoad();
+        WeaponLockManager::OnPreLoad();
 
         // Central dispatch loop — each record goes to the correct manager
         std::uint32_t type, version, length;
@@ -47,11 +53,17 @@ namespace SerializationCallbacks
             case OutfitFormBackend::kRecord:
                 OutfitFormBackend::OnLoadRecord(a_intfc, type, version, length);
                 break;
+            case SeverActionsCompat::kRecord:
+                SeverActionsCompat::OnLoadRecord(a_intfc, type, version, length);
+                break;
             case UndressManager::kUndressRecord:
                 UndressManager::OnLoadRecord(a_intfc, type, version, length);
                 break;
             case GalleryStateManager::kRecord:
                 GalleryStateManager::OnLoadRecord(a_intfc, type, version, length);
+                break;
+            case WeaponLockManager::kRecord:
+                WeaponLockManager::OnLoadRecord(a_intfc, type, version, length);
                 break;
             default:
                 if (length > 0) {
@@ -70,8 +82,10 @@ namespace SerializationCallbacks
     {
         OutfitLockManager::OnRevert(a_intfc);
         OutfitFormBackend::OnRevert(a_intfc);
+        SeverActionsCompat::OnRevert(a_intfc);
         UndressManager::OnRevert(a_intfc);
         GalleryStateManager::OnRevert(a_intfc);
+        WeaponLockManager::OnRevert(a_intfc);
     }
 }
 
@@ -121,6 +135,10 @@ void MessageHandler(SKSE::MessagingInterface::Message* a_msg)
 		SeverActionsCompat::Initialize();
 		OutfitFormBackend::GetSingleton()->Initialize();
 
+		// Devious Devices: resolve its keywords so we can tell a device's two halves
+		// apart before anything asks us to equip or strip one
+		DeviceCompat::Initialize();
+
 		// Note: ArmorModManager cache is built lazily on first gallery open
 		// to avoid blocking startup and potential timing issues with VR init
 
@@ -135,8 +153,12 @@ void MessageHandler(SKSE::MessagingInterface::Message* a_msg)
 		OutfitLockManager::GetSingleton()->Initialize();
 		// Initialize InventoryManager (registers for equip events to return items on unequip)
 		InventoryManager::GetSingleton()->Initialize();
+		// Initialize WeaponLockManager (keeps hands empty for NPCs the player disarmed)
+		WeaponLockManager::GetSingleton()->Initialize();
 		// Apply locked outfits to NPCs in current cell
 		OutfitLockManager::GetSingleton()->OnPostLoadGame();
+		// ...and look at anyone whose hands are meant to stay empty
+		WeaponLockManager::GetSingleton()->Sweep();
 
 		// Notify user if VR interactivity is unavailable due to missing dependency
 		if (InputManager::GetSingleton()->IsSkyrimVRToolsMissing()) {
@@ -157,6 +179,8 @@ void MessageHandler(SKSE::MessagingInterface::Message* a_msg)
 		OutfitLockManager::GetSingleton()->Initialize();
 		// Initialize InventoryManager (registers for equip events to return items on unequip)
 		InventoryManager::GetSingleton()->Initialize();
+		// Initialize WeaponLockManager (keeps hands empty for NPCs the player disarmed)
+		WeaponLockManager::GetSingleton()->Initialize();
 
 		// Notify user if VR interactivity is unavailable due to missing dependency
 		if (InputManager::GetSingleton()->IsSkyrimVRToolsMissing()) {

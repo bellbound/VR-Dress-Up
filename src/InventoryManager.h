@@ -10,7 +10,9 @@
 #include "dressup/OutfitFormBackend.h"
 #include "dressup/DressupTransaction.h"
 #include "dressup/ItemEquipHelper.h"
+#include "dressup/DeviceCompat.h"
 #include "dressup/UndressManager.h"
+#include "dressup/WeaponLockManager.h"
 
 // Filter mode for inventory display
 enum class InventoryFilterMode
@@ -183,6 +185,20 @@ public:
                 continue;
             }
 
+            // The rendered half of a Devious Device is a nameless armour record that DD
+            // puts on and takes off itself. It would show up as a blank entry that does
+            // nothing useful when picked - the inventory half next to it is the device.
+            if (DeviceCompat::IsRenderedDevice(armor)) {
+                continue;
+            }
+
+            // Filtered against the actor being dressed, not against whoever's inventory this
+            // is: in player mode the items come out of the player's pack and go onto the NPC,
+            // and it is the NPC who has no mesh for female-only gear.
+            if (!ItemEquipHelper::FitsActor(armor, m_targetActor)) {
+                continue;
+            }
+
             // In player mode, skip equipped items if player only has 1
             // (don't let them give away their only copy of what they're wearing)
             if (m_targetIsPlayer && data.first == 1 && ItemEquipHelper::IsArmorEquipped(source, armor)) {
@@ -202,6 +218,9 @@ public:
             for (auto* armor : m_transaction.GetTransferredArmor()) {
                 // Filter out TNG genital cover items
                 if (ShouldFilterItemName(armor->GetFullName())) {
+                    continue;
+                }
+                if (!ItemEquipHelper::FitsActor(armor, m_targetActor)) {
                     continue;
                 }
                 DressupInventoryItem item;
@@ -310,16 +329,25 @@ public:
         // Suspend lock enforcement while we make changes
         ScopedLockSuspension suspension(m_targetActor);
 
+        // Whether the click leaves the NPC holding this weapon. Recorded as intent rather
+        // than read back off the actor afterwards, because an equip is queued and does not
+        // show up in their worn items for another frame or two.
+        bool nowHolding = false;
+
         if (m_targetIsPlayer) {
             // Check if this is a transferred item (ghost entry) - if so, reverse the transfer
             if (m_transaction.IsTransferredItem(weapon->GetFormID())) {
                 ReverseTransfer(weapon);
             } else {
-                EquipFromPlayer(weapon);
+                nowHolding = EquipFromPlayer(weapon);
             }
         } else {
-            ItemEquipHelper::ToggleWeaponEquip(m_targetActor, weapon);
+            nowHolding = ItemEquipHelper::ToggleWeaponEquip(m_targetActor, weapon);
         }
+
+        // Taking an NPC's last weapon off is the whole way the no-weapon lock is asked for,
+        // and handing one back is the whole way it is called off.
+        WeaponLockManager::GetSingleton()->NoteMenuWeaponChange(m_targetActor, nowHolding);
 
         // Clear undress state when gear is manually changed
         bool undressStateCleared = ClearUndressStateOnGearChange();
@@ -400,7 +428,7 @@ public:
         // Unequip what NPC is wearing in this slot
         auto* wornArmor = ItemEquipHelper::GetWornInSlot(m_targetActor, armor);
         if (wornArmor) {
-            ItemEquipHelper::UnequipItem(m_targetActor, wornArmor);
+            ClearSlotFor(wornArmor);
         }
 
         if (!hasInInventory) {
@@ -415,7 +443,7 @@ public:
         }
 
         // Equip the armor
-        ItemEquipHelper::EquipItem(m_targetActor, armor);
+        ItemEquipHelper::EquipArmor(m_targetActor, armor);
 
         // Clear undress state when gear is manually changed
         ClearUndressStateOnGearChange();
@@ -478,6 +506,33 @@ private:
         return false;
     }
 
+    // Take off whatever is occupying the slot we are about to fill. Returns false when the
+    // slot could not be cleared, so the caller does not record an unequip that never
+    // happened.
+    //
+    // The rendered half of a Devious Device owns a real biped slot, so it is what
+    // GetWornInSlot hands back when a device is on. Pulling it off directly desyncs DD,
+    // which puts it straight back - the new piece and the device then trade the slot for
+    // as long as the NPC is loaded. A locked-on device wins the slot instead, and the
+    // player gets told rather than left wondering.
+    bool ClearSlotFor(RE::TESObjectARMO* wornArmor)
+    {
+        if (!wornArmor || !m_targetActor) return false;
+
+        if (DeviceCompat::IsRenderedDevice(wornArmor)) {
+            spdlog::info("InventoryManager::ClearSlotFor - Slot is held by a Devious Device on "
+                "'{}'; leaving it on", m_targetActor->GetName());
+            return false;
+        }
+
+        if (DeviceCompat::IsInventoryDevice(wornArmor)) {
+            return DeviceCompat::Unequip(m_targetActor, wornArmor);
+        }
+
+        ItemEquipHelper::UnequipItem(m_targetActor, wornArmor);
+        return true;
+    }
+
     // Equip item from player's inventory onto NPC (armor version)
     void EquipFromPlayer(RE::TESObjectARMO* armor)
     {
@@ -489,8 +544,7 @@ private:
 
         // Unequip what NPC is wearing in this slot
         auto* wornArmor = ItemEquipHelper::GetWornInSlot(m_targetActor, armor);
-        if (wornArmor) {
-            ItemEquipHelper::UnequipItem(m_targetActor, wornArmor);
+        if (wornArmor && ClearSlotFor(wornArmor)) {
             if (!m_transaction.IsTransferredItem(wornArmor->GetFormID())) {
                 m_transaction.TrackUnequip(wornArmor);
             }
@@ -498,7 +552,7 @@ private:
 
         // Transfer and equip
         ItemEquipHelper::TransferItem(player, m_targetActor, armor);
-        ItemEquipHelper::EquipItem(m_targetActor, armor);
+        ItemEquipHelper::EquipArmor(m_targetActor, armor);
         m_transaction.TrackTransfer(armor, true);
 
         // Mark as player-given for persistent tracking
@@ -509,12 +563,14 @@ private:
     }
 
     // Equip item from player's inventory onto NPC (weapon version)
-    void EquipFromPlayer(RE::TESObjectWEAP* weapon)
+    // Returns whether the NPC ended up holding the weapon, so the caller can tell a real
+    // handover from a click that could not be honoured.
+    bool EquipFromPlayer(RE::TESObjectWEAP* weapon)
     {
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player || !ItemEquipHelper::HasItemInInventory(player, weapon)) {
             spdlog::warn("InventoryManager::EquipFromPlayer - Player doesn't have '{}'", weapon->GetFullName());
-            return;
+            return false;
         }
 
         // Unequip NPC's current weapons in both hands
@@ -536,6 +592,7 @@ private:
 
         spdlog::info("InventoryManager::EquipFromPlayer - Transferred and equipped '{}' on {}",
             weapon->GetFullName(), m_targetActor->GetName());
+        return true;
     }
 
     // Return an item from NPC back to player (called from equip event)
@@ -561,8 +618,17 @@ private:
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player) return;
 
-        // Unequip from NPC
-        ItemEquipHelper::UnequipItem(m_targetActor, item);
+        // Unequip from NPC. A device has to be unlocked by DD first, and DD may refuse -
+        // in which case it stays where it is rather than going back half-removed.
+        if (auto* armor = item->As<RE::TESObjectARMO>(); armor && DeviceCompat::IsDevice(armor)) {
+            if (!ItemEquipHelper::UnequipArmor(m_targetActor, armor)) {
+                spdlog::info("InventoryManager::ReverseTransfer - '{}' stays on '{}': Devious "
+                    "Devices will not release it", item->GetName(), m_targetActor->GetName());
+                return;
+            }
+        } else {
+            ItemEquipHelper::UnequipItem(m_targetActor, item);
+        }
 
         // Transfer back to player
         m_targetActor->RemoveItem(item, 1, RE::ITEM_REMOVE_REASON::kRemove, nullptr, player);

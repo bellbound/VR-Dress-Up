@@ -6,6 +6,8 @@
 #include <algorithm>
 #include "log.h"
 #include "OutfitLockManager.h"
+#include "ItemEquipHelper.h"
+#include "DeviceCompat.h"
 
 // Tracks an item that was transferred from player to NPC during player mode
 struct TransferredItem
@@ -165,11 +167,24 @@ public:
 
         // Unequip and return transferred items to player
         for (const auto& transfer : m_transferredItems) {
-            if (transfer.item) {
+            if (!transfer.item) continue;
+
+            // A Devious Device comes off through DD or not at all - see DeviceCompat. If
+            // DD refuses, the device stays on the NPC rather than being handed back with
+            // its rendered half still worn.
+            if (auto* armor = transfer.item->As<RE::TESObjectARMO>();
+                armor && DeviceCompat::IsDevice(armor)) {
+                if (!ItemEquipHelper::UnequipArmor(targetActor, armor)) {
+                    spdlog::info("  Left '{}' on the NPC: Devious Devices will not release it",
+                        transfer.item->GetName());
+                    continue;
+                }
+            } else {
                 equipManager->UnequipObject(targetActor, transfer.item, nullptr, 1, nullptr, false, true);
-                targetActor->RemoveItem(transfer.item, 1, RE::ITEM_REMOVE_REASON::kRemove, nullptr, player);
-                spdlog::info("  Returned '{}' to player", transfer.item->GetName());
             }
+
+            targetActor->RemoveItem(transfer.item, 1, RE::ITEM_REMOVE_REASON::kRemove, nullptr, player);
+            spdlog::info("  Returned '{}' to player", transfer.item->GetName());
         }
 
         // Re-equip NPC's original items that were unequipped (with inventory check)
@@ -186,7 +201,12 @@ public:
                 continue;
             }
 
-            equipManager->EquipObject(targetActor, unequipped.item, nullptr, 1, nullptr, true, false, false);
+            if (auto* armor = unequipped.item->As<RE::TESObjectARMO>();
+                armor && DeviceCompat::IsDevice(armor)) {
+                ItemEquipHelper::EquipArmor(targetActor, armor);
+            } else {
+                equipManager->EquipObject(targetActor, unequipped.item, nullptr, 1, nullptr, true, false, false);
+            }
             spdlog::info("  Re-equipped '{}' on NPC", unequipped.item->GetName());
         }
 

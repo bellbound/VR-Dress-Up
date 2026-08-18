@@ -7,6 +7,8 @@
 #include <vector>
 #include <string>
 #include <mutex>
+#include <atomic>
+#include <cstdint>
 #include "FormKeyUtil.h"
 
 // Stores a single armor item in a load-order-independent way
@@ -211,6 +213,14 @@ public:
     uint32_t MarkPlayerGivenFromFormKeys(RE::Actor* actor,
                                          const std::vector<std::string>& formKeys);
 
+    // === User-edit bracket ===
+    //
+    // Held for the duration of a menu-driven outfit change. The external-change watcher
+    // ignores equip traffic while one is open, because the change is ours and the lock is
+    // about to be re-saved to match it - see ScopedLockSuspension.
+    void BeginUserEdit();
+    void EndUserEdit();
+
     // Add any item of a stored outfit that the actor does not already have.
     // Returns the number added.
     //
@@ -229,14 +239,120 @@ private:
     // Get all currently equipped armor on an actor
     std::vector<RE::TESObjectARMO*> GetEquippedArmor(RE::Actor* actor) const;
 
-    // Unequip armor in specified slots (30-45 for body armor)
-    void UnequipArmorSlots(RE::Actor* actor);
+    // Unequip every worn armour piece that is not in `keep`. Passing an empty `keep`
+    // strips the actor, which is what the old UnequipArmorSlots did unconditionally.
+    void UnequipArmorExcept(RE::Actor* actor, const std::vector<RE::TESObjectARMO*>& keep);
 
     // Equip a list of armor items on an actor
     void EquipArmorList(RE::Actor* actor, const std::vector<RE::TESObjectARMO*>& items);
 
     // Get mod name for a form (for logging)
     std::string GetModName(RE::TESForm* form) const;
+
+    // === Re-entrancy ===
+    //
+    // Our own UnequipObject/EquipObject calls come straight back to us as TESEquipEvents.
+    // OutfitFormBackend::IsApplying only covers the SetOutfit path (it is a time window
+    // opened in DispatchSetOutfit), so ApplyOutfit's direct equip-manager calls used to
+    // re-enter ProcessEvent - and a gallery-marked piece would be destroyed by the very
+    // apply that was putting it back on.
+    void BeginSelfDriven(RE::FormID actorID);
+    void EndSelfDriven(RE::FormID actorID);
+    bool IsSelfDriven(RE::FormID actorID) const;
+
+    // RAII bracket for anything that drives equips on one actor.
+    class SelfDrivenScope
+    {
+    public:
+        SelfDrivenScope(OutfitLockManager* mgr, RE::FormID actorID)
+            : m_mgr(mgr), m_actorID(actorID)
+        {
+            if (m_mgr && m_actorID) m_mgr->BeginSelfDriven(m_actorID);
+        }
+        ~SelfDrivenScope()
+        {
+            if (m_mgr && m_actorID) m_mgr->EndSelfDriven(m_actorID);
+        }
+        SelfDrivenScope(const SelfDrivenScope&) = delete;
+        SelfDrivenScope& operator=(const SelfDrivenScope&) = delete;
+
+    private:
+        OutfitLockManager* m_mgr;
+        RE::FormID m_actorID;
+    };
+
+    // === Equip-storm circuit breaker ===
+    //
+    // When another mod puts an NPC into an equip/unequip loop, every event fans out into
+    // Papyrus (XPMSE restyle, Devious Devices slotmasks, OBody presets) and the suspended
+    // stack count climbs until the VM tries to freeze itself to dump stacks - a 30s stall
+    // per attempt. We cannot stop the loop, but we can refuse to feed it and we can name
+    // the actor responsible in our own log instead of leaving it to be reconstructed from
+    // six different logs afterwards.
+    static constexpr std::int64_t kStormWindowMs = 1000;
+    static constexpr std::uint32_t kStormThreshold = 40;   // events per actor per window
+    static constexpr std::int64_t kStormBackoffMs = 30000;
+
+    // Record one equip event for this actor. Returns true when the actor is in backoff.
+    bool NoteEquipAndCheckStorm(RE::FormID actorID, const char* actorName);
+
+    // Is this actor currently backed off? Cheap; used to skip reapplies.
+    bool IsInEquipBackoff(RE::FormID actorID) const;
+
+    // Coalesce location-change reapplies. Door transitions and fast travel fire these in
+    // bursts, and a full reapply per burst is what turns 2 followers into 24 equip events.
+    static constexpr std::int64_t kLocationDebounceMs = 1500;
+
+    // === External-change enforcement (bReapplyOnExternalChange) ===
+    //
+    // A lock only survived a location change or a save before this: anything that undressed
+    // a locked NPC in place - a scene, a bath mod, an outfit manager we did not detect -
+    // stayed undressed until the player walked them through a door.
+    //
+    // Two limiters keep that from becoming a fight. The delay coalesces a burst (one outfit
+    // swap is a dozen equip events) into a single reapply. The leaky bucket below then caps
+    // the *sustained* rate: credit drains at one reapply per iReapplySustainedIntervalSec,
+    // so a handful of reapplies close together passes as a fluke, while anything that keeps
+    // undressing the NPC faster than we are willing to redress them fills the bucket and
+    // trips a long stand-down. The alternative is trading equips with the other mod forever,
+    // and every exchange runs XPMSE/DD/OBody Papyrus for both of us.
+
+    // Something other than us changed a locked actor's armour. Schedules a reapply.
+    void NoteExternalOutfitChange(RE::Actor* actor, RE::FormID baseObject);
+
+    // Fires on the main thread once the coalescing delay is up.
+    void RunPendingReapply(RE::FormID actorID);
+
+    // Charge one reapply against this actor's budget. False means we are backing off.
+    bool ClaimReapplySlot(RE::FormID actorID, const char* actorName);
+
+    // Is what the actor is wearing still the locked set? Another mod re-equipping a piece
+    // that is already part of the outfit is not a divergence, and must not cost either
+    // equip traffic or a slot in the budget above - otherwise a mod that merely refreshes
+    // gear would trip the breaker without ever having undressed anyone.
+    bool DiffersFromLockedOutfit(RE::Actor* actor) const;
+
+    struct ReapplyState
+    {
+        bool pending = false;              // a delayed reapply is already on its way
+        std::int64_t lastReapplyMs = 0;    // for draining the bucket
+        double burst = 0.0;                // bucket level, in reapplies
+        std::int64_t backoffUntilMs = 0;
+        bool reported = false;
+    };
+    std::unordered_map<RE::FormID, ReapplyState> m_reapply;
+    mutable std::mutex m_reapplyMutex;
+
+    // Number of stored "locked" outfits. Read on the equip-event path, which runs for every
+    // equip in the loaded area, so the no-locked-NPC case costs an atomic load rather than
+    // m_mutex on the game thread. Maintained by RefreshLockedCount.
+    std::atomic<int> m_lockedCount{0};
+
+    // Recount m_lockedCount from m_outfits. Caller must hold m_mutex.
+    void RefreshLockedCount();
+
+    // Menu edits in flight. Their equips are ours, and the lock is re-saved when they end.
+    std::atomic<int> m_userEditCount{0};
 
     bool m_initialized = false;
     bool m_cellEventRegistered = false;
@@ -251,8 +367,34 @@ private:
     // These items are destroyed when unequipped (session-based, not persisted)
     std::unordered_map<RE::FormID, std::unordered_set<RE::FormID>> m_gallerySpawnedItems;
 
+    // Lock-free "is there any gallery item at all" flag. TESEquipEvent lands on the game
+    // thread for every equip in the loaded area - hundreds a second once some other mod
+    // starts thrashing - and taking m_mutex on each one puts that contention on the frame.
+    // Gallery items are rare and short-lived, so this is false almost always.
+    std::atomic<bool> m_hasGalleryItems{false};
+
     // Mutex for thread safety
     mutable std::mutex m_mutex;
+
+    // Actors whose equip events are our own doing. Separate lock: ApplyOutfit holds
+    // m_mutex in places and the equip handler must never wait on it.
+    std::unordered_set<RE::FormID> m_selfDriven;
+    mutable std::mutex m_selfDrivenMutex;
+    std::atomic<int> m_selfDrivenCount{0};
+
+    struct EquipRate
+    {
+        std::int64_t windowStartMs = 0;
+        std::uint32_t count = 0;
+        std::int64_t backoffUntilMs = 0;
+        bool reported = false;
+    };
+    std::unordered_map<RE::FormID, EquipRate> m_equipRate;
+    mutable std::mutex m_equipRateMutex;
+
+    // Last time we reapplied a locked outfit, per actor, for the debounce above.
+    std::unordered_map<RE::FormID, std::int64_t> m_lastApplyMs;
+    mutable std::mutex m_lastApplyMutex;
 };
 
 // RAII helper for outfit modifications on potentially locked actors
@@ -268,6 +410,7 @@ public:
         : m_actor(actor)
         , m_wasLocked(actor ? OutfitLockManager::GetSingleton()->IsLocked(actor) : false)
     {
+        OutfitLockManager::GetSingleton()->BeginUserEdit();
     }
 
     ~ScopedLockSuspension()
@@ -278,6 +421,10 @@ public:
             mgr->SaveOutfit(m_actor, "locked");
             mgr->PromoteLockToOutfitForm(m_actor);
         }
+
+        // Ends last: the re-save above is what makes the new look the locked one, and the
+        // watcher must not see the scope's own equips before that has happened.
+        OutfitLockManager::GetSingleton()->EndUserEdit();
     }
 
     // Was the actor locked before we started?

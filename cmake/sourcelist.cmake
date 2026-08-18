@@ -4,8 +4,10 @@ set(sources ${sources}
     src/MenuChecker.cpp
     src/higgsinterface001.cpp
     src/dressup/OutfitLockManager.cpp
+    src/dressup/WeaponLockManager.cpp
     src/dressup/OutfitFormBackend.cpp
     src/dressup/SeverActionsCompat.cpp
+    src/dressup/DeviceCompat.cpp
     src/dressup/PapyrusBridge.cpp
     src/dressup/FormKeyUtil.cpp
     src/dressup/KeywordCategoryManager.cpp

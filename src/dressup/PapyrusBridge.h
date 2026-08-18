@@ -19,6 +19,10 @@ namespace PapyrusBridge
     // here, on a later frame. `success` is false if the call never produced an Int.
     using IntResult = std::function<void(bool success, std::int32_t value)>;
 
+    // Same for a Bool return. A Papyrus Bool is its own Variable type, not an Int, so
+    // IntResult never fires for one.
+    using BoolResult = std::function<void(bool success, bool value)>;
+
     // Null when the call returned None or the handle no longer resolves.
     using FormResult = std::function<void(RE::TESForm* form)>;
 
@@ -33,11 +37,29 @@ namespace PapyrusBridge
     bool CallGlobalInt(const char* className, const char* fnName,
                        RE::BSScript::IFunctionArguments* args, IntResult callback);
 
+    // Global Native call returning a Bool. Takes ownership of `args`.
+    bool CallGlobalBool(const char* className, const char* fnName,
+                        RE::BSScript::IFunctionArguments* args, BoolResult callback);
+
     // Method call on a script attached to `target`, returning an Int.
     // Takes ownership of `args`.
     bool CallMethodInt(RE::TESForm* target, RE::FormType targetType,
                        const char* scriptName, const char* fnName,
                        RE::BSScript::IFunctionArguments* args, IntResult callback);
+
+    // Method call on a script attached to `target`, fire and forget. Takes ownership
+    // of `args`. Use for calls whose return value we have no use for - the Papyrus side
+    // runs on its own schedule either way.
+    bool CallMethod(RE::TESForm* target, RE::FormType targetType,
+                    const char* scriptName, const char* fnName,
+                    RE::BSScript::IFunctionArguments* args);
+
+    // The quest that has `scriptName` bound to it, or null. Asking the VM rather than
+    // looking a FormID up means a mod can move or rebuild the quest record without
+    // breaking us; the caller is expected to cache the result.
+    //
+    // Returns null before a save is loaded, because nothing is bound until then.
+    RE::TESQuest* FindQuestWithScript(const char* scriptName);
 
     // Global Native call returning a form of `formType`. Takes ownership of `args`.
     bool CallGlobalForm(const char* className, const char* fnName, RE::FormType formType,

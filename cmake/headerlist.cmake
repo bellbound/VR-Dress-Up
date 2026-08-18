@@ -20,8 +20,10 @@ set(headers ${headers}
     src/dressup/KeywordCategoryManager.h
     src/dressup/UndressManager.h
     src/dressup/OutfitLockManager.h
+    src/dressup/WeaponLockManager.h
     src/dressup/OutfitFormBackend.h
     src/dressup/SeverActionsCompat.h
+    src/dressup/DeviceCompat.h
     src/dressup/PapyrusBridge.h
     src/util/VRNodes.h
     external/VRManagerAPI.h

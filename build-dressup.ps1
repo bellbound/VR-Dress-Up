@@ -5,5 +5,5 @@ param(
     [switch]$Reconfigure
 )
 $mainScript = Join-Path $PSScriptRoot "..\..\build-skse-mods.ps1"
-& $mainScript --mod VR-Dress-Up -Config $Config -Clean:$Clean -Reconfigure:$Reconfigure
+& $mainScript -Mod VR-Dress-Up -Config $Config -Clean:$Clean -Reconfigure:$Reconfigure
 exit $LASTEXITCODE
