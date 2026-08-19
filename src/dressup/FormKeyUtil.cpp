@@ -4,8 +4,53 @@
 #include <RE/T/TESDataHandler.h>
 #include <fmt/format.h>
 #include <charconv>
+#include <cstdint>
 
 namespace Persistence {
+
+namespace {
+
+// The plugin a runtime FormID's own index bits name, and the local id left over
+// once those bits are stripped.
+//
+// The exact inverse of TESDataHandler::LookupFormID, which is what
+// ResolveToRuntimeFormID goes through - deliberately, so a key built here always
+// reads back as the form it was built from.
+//
+// Walks handler->files, the same list LookupModByName walks, rather than
+// GetLoadedMods(): on VR that accessor is a hard-coded struct offset.
+//
+// Whether ESL space exists is asked of the *runtime*, not of IsVR(). Stock Skyrim
+// VR 1.4.15 has none, so an 0xFE top byte there is a plain compile index of 254 -
+// a real slot in a load order that big. SkyrimVRESL gives VR a genuine
+// light-plugin collection, and branching on IsVR() would be wrong on one install
+// or the other; GetLoadedLightModCount() answers the question actually being asked
+// on both.
+const RE::TESFile* OwningFile(RE::TESDataHandler* handler, RE::FormID formId,
+                              RE::FormID& localId)
+{
+    if ((formId & 0xFF000000u) == 0xFE000000u && handler->GetLoadedLightModCount() > 0) {
+        const auto smallIndex = static_cast<std::uint16_t>((formId & 0x00FFF000u) >> 12);
+        localId = formId & 0x00000FFFu;
+        for (const auto* file : handler->files) {
+            if (file && file->compileIndex == 0xFE && file->smallFileCompileIndex == smallIndex) {
+                return file;
+            }
+        }
+        return nullptr;
+    }
+
+    const auto index = static_cast<std::uint8_t>((formId & 0xFF000000u) >> 24);
+    localId = formId & 0x00FFFFFFu;
+    for (const auto* file : handler->files) {
+        if (file && file->compileIndex == index) {
+            return file;
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace
 
 std::string FormKeyUtil::BuildFormKey(RE::TESObjectREFR* ref)
 {
@@ -21,18 +66,45 @@ std::string FormKeyUtil::BuildFormKey(RE::TESForm* form)
         return "";
     }
 
-    // Get the originating file (index 0 = first/primary source file)
-    auto* file = form->GetFile(0);
-    if (!file) {
-        spdlog::trace("FormKeyUtil: Form {:08X} has no source file (dynamic form?)",
-            form->GetFormID());
+    const RE::FormID formId = form->GetFormID();
+
+    // A dynamic form is an allocator value private to one save. It names nothing
+    // in another one, so it gets no key at all.
+    if ((formId & 0xFF000000u) == 0xFF000000u) {
+        spdlog::trace("FormKeyUtil: Form {:08X} is dynamic (no source plugin)", formId);
         return "";
     }
 
-    RE::FormID localId = form->GetLocalFormID();
-    std::string_view pluginName = file->GetFilename();
+    auto* handler = RE::TESDataHandler::GetSingleton();
+    if (!handler) {
+        spdlog::error("FormKeyUtil: TESDataHandler not available");
+        return "";
+    }
 
-    return BuildFormKey(localId, pluginName);
+    // Deliberately *not* sourceFiles / GetFile(0). That array lists plugins that
+    // touch the form, and for an overridden record it can hold only the overriding
+    // one - the plugin that never declared this id. Base records keep an ordered
+    // source list so they came out right; references do not, which is why this only
+    // ever bit reference keys.
+    //
+    // Measured in DressUpVR.log 2026-08-19: three vanilla NPCs were keyed off the
+    // plugin that merely overrides them - 0x000C3B2B and 0x000E1BA9 (Skyrim.esm)
+    // as '0xC3B2B~3DNPC.esp' and '0xE1BA9~3DNPC.esp', 0x000198AD as
+    // '0x198AD~AX ValSerano.esp'. Every one came back on load as
+    // "FormKeyUtil: <id> not found in <plugin>", because those local ids exist in
+    // no such plugin. Save-Migration hit the identical key on Keeper Carcette.
+    //
+    // The FormID's own index bits are not a hint, they are the answer: the engine
+    // builds a runtime id by pasting the owning plugin's load order index onto its
+    // local id, and that is what the in-game console reports.
+    RE::FormID localId = 0;
+    const auto* file = OwningFile(handler, formId, localId);
+    if (!file) {
+        spdlog::warn("FormKeyUtil: no loaded plugin holds the index of form {:08X}", formId);
+        return "";
+    }
+
+    return BuildFormKey(localId, file->GetFilename());
 }
 
 std::string FormKeyUtil::BuildFormKey(RE::FormID localFormId, std::string_view pluginName)
@@ -141,7 +213,7 @@ RE::FormID FormKeyUtil::ResolveToRuntimeFormID(std::string_view keyString)
     // this right on both runtimes.
     auto* form = dataHandler->LookupForm(parsed->localFormId, file->GetFilename());
     if (!form) {
-        spdlog::warn("FormKeyUtil: {} not found in {}", parsed->localFormId, parsed->pluginName);
+        spdlog::warn("FormKeyUtil: 0x{:X} not found in {}", parsed->localFormId, parsed->pluginName);
         return 0;
     }
     return form->GetFormID();
