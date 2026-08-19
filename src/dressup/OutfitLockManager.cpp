@@ -486,6 +486,17 @@ std::vector<RE::TESObjectARMO*> OutfitLockManager::GetEquippedArmor(RE::Actor* a
         // it back would mean equipping it behind DD's back. See DeviceCompat.
         if (DeviceCompat::IsRenderedDevice(armor)) continue;
 
+        // Taken off already as far as the player is concerned - the removal is a
+        // zadlibs.UnlockDevice still working its way through Papyrus. Counting it would put
+        // the device the player just removed back into the outfit, and the reapply behind
+        // the removal would lock it on again. See ItemEquipHelper's Pending note.
+        if (ItemEquipHelper::IsPendingUnequip(actor, armor)) {
+            spdlog::debug("OutfitLockManager::GetEquippedArmor - skipping '{}' (0x{:08X}): "
+                "removed this frame, the engine still shows it worn",
+                armor->GetFullName(), armor->GetFormID());
+            continue;
+        }
+
         // An armour piece covering several slots is still one item.
         const auto duplicate = std::find_if(result.begin(), result.end(),
             [armor](RE::TESObjectARMO* existing) {
@@ -543,7 +554,9 @@ void OutfitLockManager::UnequipArmorExcept(RE::Actor* actor,
         // effects with it. Pulling the inventory half out from under DD instead is what
         // made it re-equip the device a moment later.
         if (DeviceCompat::IsInventoryDevice(armor)) {
-            if (!DeviceCompat::Unequip(actor, armor)) {
+            if (DeviceCompat::Unequip(actor, armor)) {
+                ItemEquipHelper::NotePendingUnequip(actor, armor);
+            } else {
                 spdlog::info("OutfitLockManager::UnequipArmorExcept - '{}' stays on: Devious "
                     "Devices will not release it", armor->GetFullName());
             }
@@ -571,7 +584,7 @@ void OutfitLockManager::EquipArmorList(RE::Actor* actor, const std::vector<RE::T
         // Already worn: equipping it again is a no-op the engine still turns into a
         // TESEquipEvent, and every one of those runs a slice of Papyrus in every mod
         // listening. On a reapply where nothing changed this is the whole list.
-        if (ItemEquipHelper::IsArmorEquipped(actor, armor)) {
+        if (ItemEquipHelper::IsArmorEquippedOrPending(actor, armor)) {
             continue;
         }
 
@@ -847,8 +860,59 @@ bool OutfitLockManager::Lock(RE::Actor* actor)
         return false;
     }
 
+    // Whatever the last unlock parked is stale now: this lock is snapshotting a look the
+    // player has since put together, and offering to swap it for an older one would undo
+    // the change they just made rather than the unlock.
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_outfits.erase(OutfitKey{actor->GetFormID(), kPreUnlockOutfitName});
+    }
+
     // We defend the look from here on: SeverActions is asked to leave this NPC alone if
     // it is installed, and the outfit record is what makes SPID stand down.
+    SeverActionsCompat::TakeOver(actor);
+    PromoteLockToOutfitForm(actor);
+
+    return true;
+}
+
+bool OutfitLockManager::Relock(RE::Actor* actor)
+{
+    if (!actor || actor->IsPlayerRef()) {
+        return Lock(actor);
+    }
+
+    // Decided under the lock, acted on outside it: Lock and ApplyOutfit both take m_mutex
+    // themselves, and it is not recursive.
+    bool restored = false;
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto parked = m_outfits.find(OutfitKey{actor->GetFormID(), kPreUnlockOutfitName});
+        if (parked != m_outfits.end()) {
+            // Straight back to being the locked outfit. ApplyOutfit below re-adds anything
+            // the unlock's SetOutfit stripped out of the inventory before it equips.
+            m_outfits[OutfitKey{actor->GetFormID(), "locked"}] = parked->second;
+            m_outfits.erase(parked);
+            RefreshLockedCount();
+            restored = true;
+        }
+    }
+
+    if (!restored) {
+        return Lock(actor);
+    }
+
+    spdlog::info("OutfitLockManager::Relock - Putting '{}' back into the outfit their last "
+        "unlock parked", actor->GetName());
+
+    // The user asked for this, so it goes on regardless of what the NPC has been dressed
+    // in since - same bracket as a menu edit, so the watcher does not read our own equips
+    // as somebody else undressing them.
+    {
+        ScopedLockSuspension suspension(actor);
+        ApplyOutfit(actor, "locked", true);
+    }
+
     SeverActionsCompat::TakeOver(actor);
     PromoteLockToOutfitForm(actor);
 
@@ -864,6 +928,22 @@ bool OutfitLockManager::Unlock(RE::Actor* actor)
 
     spdlog::info("OutfitLockManager::Unlock - Unlocking actor '{}' (0x{:08X})",
         actor->GetName(), actor->GetFormID());
+
+    // Park the outfit we were defending before anything else touches it. The restore below
+    // puts the NPC straight back into their original clothes, which is a whole dressing
+    // session thrown away by one click of a toggle; Relock hands it back.
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        const auto locked = m_outfits.find(OutfitKey{actor->GetFormID(), "locked"});
+        if (locked != m_outfits.end() && !locked->second.items.empty()) {
+            m_outfits[OutfitKey{actor->GetFormID(), kPreUnlockOutfitName}] = locked->second;
+            spdlog::info("OutfitLockManager::Unlock - Parked {} item(s) as '{}'; locking '{}' "
+                "again puts them back on", locked->second.items.size(), kPreUnlockOutfitName,
+                actor->GetName());
+        } else {
+            m_outfits.erase(OutfitKey{actor->GetFormID(), kPreUnlockOutfitName});
+        }
+    }
 
     // Give the NPC back to whoever had them: restoring the original outfit is what lets
     // SPID resume distributing to this actor. Restore first, then release - the other way

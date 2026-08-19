@@ -114,6 +114,14 @@ public:
 
     RE::Actor* GetTargetActor() const { return m_targetActor; }
 
+    // Whose inventory the wheel is currently showing: the player in player mode, the NPC
+    // being dressed otherwise. Public because the wheel has to ask what this actor is
+    // wearing in order to mark those items.
+    RE::Actor* GetSourceActor() const
+    {
+        return m_targetIsPlayer ? RE::PlayerCharacter::GetSingleton() : m_targetActor;
+    }
+
     void SetTargetIsPlayer(bool isPlayer)
     {
         // When switching back to NPC mode, clear ghost items (transfers are "confirmed")
@@ -390,7 +398,9 @@ public:
         if (!m_targetActor) return false;
 
         spdlog::info("InventoryManager::LockNpc - Locking '{}'", m_targetActor->GetName());
-        OutfitLockManager::GetSingleton()->Lock(m_targetActor);
+        // Relock rather than Lock: this is the lock button, the one place a lock can be
+        // undoing the unlock that came before it.
+        OutfitLockManager::GetSingleton()->Relock(m_targetActor);
         return true;
     }
 
@@ -476,11 +486,6 @@ private:
     InventoryManager(const InventoryManager&) = delete;
     InventoryManager& operator=(const InventoryManager&) = delete;
 
-    RE::Actor* GetSourceActor() const
-    {
-        return m_targetIsPlayer ? RE::PlayerCharacter::GetSingleton() : m_targetActor;
-    }
-
     // Auto-lock NPC when changes are made
     void AutoLockNpc()
     {
@@ -526,7 +531,12 @@ private:
         }
 
         if (DeviceCompat::IsInventoryDevice(wornArmor)) {
-            return DeviceCompat::Unequip(m_targetActor, wornArmor);
+            if (!DeviceCompat::Unequip(m_targetActor, wornArmor)) return false;
+            // DD clears the worn flag from Papyrus, well after this returns, so the
+            // re-save at the end of this edit would otherwise put the device back into
+            // the locked outfit and the reapply would lock it on again.
+            ItemEquipHelper::NotePendingUnequip(m_targetActor, wornArmor);
+            return true;
         }
 
         ItemEquipHelper::UnequipItem(m_targetActor, wornArmor);

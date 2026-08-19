@@ -63,10 +63,16 @@ namespace Backdrop
     // row turning into a light show.
     constexpr Tint kCategorySelected = {0.45f, 0.68f, 1.00f, 1.00f, 1.90f};
 
-    // Every item in the wheel. Same blue, but mostly transparent and barely glowing: there
-    // are dozens of these at once and their job is to give each item a disc to read
-    // against, not to compete with the item or with the gallery row below.
-    constexpr Tint kItem = {0.40f, 0.60f, 1.00f, 0.35f, 0.45f};
+    // Every item in the wheel. The same plate the gallery row rests on: it was a third of
+    // this opaque and barely glowing, on the reasoning that dozens at once would drown out
+    // the items, but in the headset that read as no plate at all - the items floated
+    // against whatever the player happened to be standing in front of.
+    constexpr Tint kItem = kCategoryIdle;
+
+    // An item the actor whose inventory this is already has on. Warm rather than one more
+    // step along the blue, because the whole wheel is now the neutral plate above and a
+    // brighter blue would read as "selected" rather than "worn" next to the gallery row.
+    constexpr Tint kItemEquipped = {1.00f, 0.72f, 0.42f, 1.00f, 1.70f};
 
     // The one place that puts a backdrop on an element, so every row agrees about which
     // mesh it is.
@@ -83,9 +89,9 @@ namespace Backdrop
         Apply(element, kCategoryScale, selected ? kCategorySelected : kCategoryIdle);
     }
 
-    inline void ApplyItem(P3DUI::Element* element)
+    inline void ApplyItem(P3DUI::Element* element, bool equipped = false)
     {
-        Apply(element, kItemScale, kItem);
+        Apply(element, kItemScale, equipped ? kItemEquipped : kItem);
     }
 }
 
@@ -483,9 +489,14 @@ private:
 
         // Lock toggle button - allows manual lock/unlock
         bool isLocked = invMgr->IsNpcLocked();
+        const bool canRestore = !isLocked && targetActor &&
+            OutfitLockManager::GetSingleton()->HasOutfit(
+                targetActor, OutfitLockManager::kPreUnlockOutfitName);
         std::wstring lockTooltip = isLocked
             ? L"Unlock (" + ToWide(npcName) + L" is Locked)"
-            : L"Lock (" + ToWide(npcName) + L" is Unlocked)";
+            : canRestore
+                ? L"Lock (puts the outfit you unlocked back on)"
+                : L"Lock (" + ToWide(npcName) + L" is Unlocked)";
         std::string lockIcon = isLocked
             ? "textures\\VRDressup\\lock_highlight.dds"
             : "textures\\VRDressup\\unlock.dds";
@@ -501,29 +512,37 @@ private:
             m_handleRow->AddChild(lockButton);
         }
 
-        // Undress/Redress button - cycles through undress states
+        // Undress/Redress button - cycles through undress states. Follows the inventory
+        // toggle: in player mode it is the player who gets undressed, which is the whole
+        // reason it follows - getting your own gear off and back on is otherwise a trip
+        // through the pause menu, one slot at a time.
+        RE::Actor* undressActor = UndressTarget();
         auto* undressMgr = UndressManager::GetSingleton();
-        auto undressState = undressMgr->GetUndressState(targetActor);
+        auto undressState = undressMgr->GetUndressState(undressActor);
+        const std::wstring undressWho =
+            invMgr->IsTargetPlayer() ? L" (You)" : L"";
 
         P3DUI::ElementConfig undressConfig = P3DUI::ElementConfig::Default("undress_button");
         undressConfig.scale = 1.2f;
         undressConfig.facingMode = P3DUI::FacingMode::None;
 
+        std::wstring undressTooltip;
         switch (undressState) {
             case UndressState::Dressed:
             default:  // Fallback to dressed state for safety
                 undressConfig.texturePath = "textures\\VRDressup\\undress-partial.dds";
-                undressConfig.tooltip = L"Undress Armor";
+                undressTooltip = L"Undress Armor" + undressWho;
                 break;
             case UndressState::PartiallyUndressed:
                 undressConfig.texturePath = "textures\\VRDressup\\undress-full.dds";
-                undressConfig.tooltip = L"Undress Fully";
+                undressTooltip = L"Undress Fully" + undressWho;
                 break;
             case UndressState::FullyUndressed:
                 undressConfig.texturePath = "textures\\VRDressup\\redress-full.dds";
-                undressConfig.tooltip = L"Re-dress";
+                undressTooltip = L"Re-dress" + undressWho;
                 break;
         }
+        undressConfig.tooltip = undressTooltip.c_str();
 
         auto* undressButton = m_api->CreateElement(undressConfig);
         if (undressButton) {
@@ -588,6 +607,7 @@ private:
         if (!m_itemSpiral || !m_api) return;
 
         m_itemSpiral->Clear();
+        m_itemElements.clear();
 
         // Item 0: Anchor handle (Close/Grab) - always first in spiral
         P3DUI::ElementConfig anchorConfig = P3DUI::ElementConfig::Default("anchor_handle");
@@ -638,12 +658,43 @@ private:
 
             auto* item = m_api->CreateElement(itemConfig);
             if (item) {
-                Backdrop::ApplyItem(item);
+                Backdrop::ApplyItem(item, IsItemWorn(inventoryItem));
+                m_itemElements.push_back(item);
                 m_itemSpiral->AddChild(item);
             }
         }
 
         spdlog::info("DressupMenuManager::RefreshItemSpiral - Refreshed with {} items + anchor handle", m_currentItemList.size());
+    }
+
+    // Is this wheel entry something the actor whose inventory we are showing has on?
+    //
+    // Asked of the intent rather than of the engine - see ItemEquipHelper's Pending note.
+    // An equip is queued and does not reach the actor for another frame or two, and a
+    // Devious Devices removal takes far longer than that, so reading the worn flag straight
+    // back after a click would leave the plate showing the state the player just left.
+    bool IsItemWorn(const DressupInventoryItem& item) const
+    {
+        RE::Actor* source = InventoryManager::GetSingleton()->GetSourceActor();
+        if (!source) return false;
+
+        if (item.armor) return ItemEquipHelper::IsArmorEquippedOrPending(source, item.armor);
+        if (item.weapon) return ItemEquipHelper::IsWeaponEquipped(source, item.weapon);
+        return false;
+    }
+
+    // Re-tint the wheel in place after a click, the way RefreshCategoryHighlight does for
+    // the gallery row. Rebuilding the spiral instead would drop every element and recreate
+    // it - dozens of models re-read from disk - to change one plate's colour.
+    void RefreshItemHighlight()
+    {
+        if (IsShowingGalleryItems()) return;  // gallery plates carry no worn state
+
+        // Parenthesised: Windows.h defines min as a macro.
+        const size_t count = (std::min)(m_itemElements.size(), m_currentItemList.size());
+        for (size_t i = 0; i < count; ++i) {
+            Backdrop::ApplyItem(m_itemElements[i], IsItemWorn(m_currentItemList[i]));
+        }
     }
 
     // Refresh item spiral with armor from the active gallery category (mod or keyword)
@@ -707,6 +758,14 @@ private:
             wasPlayer ? "Player" : "NPC",
             wasPlayer ? "NPC" : "Player");
 
+        // The galleries browse the whole game's wardrobe onto the NPC, which is the one
+        // thing player mode is not for - leaving one open just buries your own pack under
+        // a category you cannot use from here. Closing it refreshes everything below.
+        if (!wasPlayer && IsGalleryVisible()) {
+            SetGalleryMode(GalleryMode::None);
+            return;
+        }
+
         // Refresh both the item spiral and handle row (to update toggle button text)
         RefreshItemSpiral();
         PopulateHandleRow();
@@ -728,7 +787,9 @@ private:
             invMgr->LockNpc();
         }
 
-        // Refresh handle row to update lock button state
+        // Both directions can move gear: a re-lock puts the parked outfit back on, and an
+        // unlock hands the NPC to their original one.
+        RefreshItemSpiral();
         PopulateHandleRow();
     }
 
@@ -754,11 +815,19 @@ private:
         PopulateHandleRow();
     }
 
+    // Who the undress button acts on: the player in player mode, the NPC otherwise.
+    RE::Actor* UndressTarget() const
+    {
+        auto* invMgr = InventoryManager::GetSingleton();
+        return invMgr->IsTargetPlayer()
+            ? RE::PlayerCharacter::GetSingleton()->As<RE::Actor>()
+            : invMgr->GetTargetActor();
+    }
+
     // Callback: Undress/Redress button clicked - cycle through states
     void OnUndressButtonClicked()
     {
-        auto* invMgr = InventoryManager::GetSingleton();
-        RE::Actor* targetActor = invMgr->GetTargetActor();
+        RE::Actor* targetActor = UndressTarget();
 
         if (!targetActor) {
             spdlog::warn("DressupMenuManager::OnUndressButtonClicked - No target actor");
@@ -1186,6 +1255,7 @@ public:
 
         // Clear item list
         m_currentItemList.clear();
+        m_itemElements.clear();
 
         // Clear gallery state
         m_galleryMode = GalleryMode::None;
@@ -1340,6 +1410,9 @@ private:
         // Refresh UI - in player mode: item was transferred out, need to refresh item list
         if (wasPlayerMode) {
             RefreshItemSpiral();
+        } else {
+            // The list is the same; only what the NPC has on has changed.
+            RefreshItemHighlight();
         }
 
         // Refresh handle row if lock state or undress state changed
@@ -1372,6 +1445,11 @@ private:
     // so the selection highlight can be re-tinted in place; cleared whenever the row is,
     // because Clear() destroys the elements these point at.
     std::vector<P3DUI::Element*> m_categoryElements;
+
+    // The wheel's live elements, in the same order as m_currentItemList, so the worn
+    // highlight can be re-tinted without rebuilding the spiral. Same lifetime rule as
+    // m_categoryElements: cleared wherever the container it holds is.
+    std::vector<P3DUI::Element*> m_itemElements;
 
     std::vector<ModCategoryInfo> m_categoryList;         // Mods currently in the gallery row
     std::vector<KeywordCategoryInfo> m_keywordCategoryList;  // Keyword categories currently in the gallery row

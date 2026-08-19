@@ -118,10 +118,28 @@ public:
     // Check if an actor has a saved outfit with the given name
     bool HasOutfit(RE::Actor* actor, const std::string& outfitName) const;
 
-    // Lock an actor (creates "locked" outfit from current equipped armor)
+    // Where an unlock parks the outfit it was defending, so the next lock can offer it
+    // back. Ordinary storage, so it is persisted and forgotten like any other outfit -
+    // it just never counts towards m_lockedCount, which only tracks "locked".
+    static constexpr const char* kPreUnlockOutfitName = "preunlock";
+
+    // Lock an actor (creates "locked" outfit from current equipped armor).
+    //
+    // Snapshots what the actor has on right now, which is what every caller other than
+    // the lock button wants: they have just changed the outfit and are locking the result.
+    // Doing so discards any parked pre-unlock outfit - the player has dressed this NPC
+    // since, so there is nothing left to undo.
     bool Lock(RE::Actor* actor);
 
-    // Unlock an actor (deletes "locked" outfit)
+    // Lock from the button, which is the one caller that may be undoing an unlock.
+    //
+    // If the actor still has the outfit their last unlock parked - i.e. nothing has
+    // dressed them since - it goes back on and becomes the locked outfit again. Otherwise
+    // this is just Lock. Returns true if the parked outfit was restored.
+    bool Relock(RE::Actor* actor);
+
+    // Unlock an actor. Parks the "locked" outfit under kPreUnlockOutfitName first, so
+    // Relock can put it back.
     bool Unlock(RE::Actor* actor);
 
     // Check if an actor is locked

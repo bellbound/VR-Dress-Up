@@ -198,7 +198,7 @@ public:
             // player picks one in the wheel.
             if (UndressHelper::IsWig(armor)) continue;
 
-            if (UndressHelper::IsOuterArmor(armor) && ItemEquipHelper::IsArmorEquipped(actor, armor)) {
+            if (UndressHelper::IsOuterArmor(armor) && ItemEquipHelper::IsArmorEquippedOrPending(actor, armor)) {
                 equipManager->UnequipObject(actor, armor, nullptr, 1, nullptr, false, true);
                 spdlog::trace("  - Unequipped outer armor: '{}'", armor->GetFullName());
             }
@@ -208,8 +208,10 @@ public:
         SetUndressState(actor, UndressState::PartiallyUndressed);
 
         // Lock will be re-applied when suspension goes out of scope (if was locked),
-        // or we manually lock if this is a fresh undress
-        if (!suspension.WasLocked()) {
+        // or we manually lock if this is a fresh undress. Not for the player: the lock is
+        // a grip on an NPC the game would otherwise redress, and nothing redresses the
+        // player behind their back.
+        if (!suspension.WasLocked() && !actor->IsPlayerRef()) {
             OutfitLockManager::GetSingleton()->Lock(actor);
         }
 
@@ -250,13 +252,15 @@ public:
             // Hair stays on even for a full undress - see UndressHelper::IsWig.
             if (UndressHelper::IsWig(armor)) continue;
 
-            if (!ItemEquipHelper::IsArmorEquipped(actor, armor)) continue;
+            if (!ItemEquipHelper::IsArmorEquippedOrPending(actor, armor)) continue;
 
             if (DeviceCompat::IsInventoryDevice(armor)) {
                 // A full undress means everything, devices included - unlocked without a
                 // key, because this is the wardrobe tool rather than the player picking at
                 // a lock. DD still refuses quest devices, and those stay on.
-                if (!DeviceCompat::Unequip(actor, armor)) {
+                if (DeviceCompat::Unequip(actor, armor)) {
+                    ItemEquipHelper::NotePendingUnequip(actor, armor);
+                } else {
                     spdlog::info("  - '{}' stays on: Devious Devices will not release it",
                         armor->GetFullName());
                 }
@@ -271,8 +275,10 @@ public:
         SetUndressState(actor, UndressState::FullyUndressed);
 
         // Lock will be re-applied when suspension goes out of scope (if was locked),
-        // or we manually lock if this is a fresh undress
-        if (!suspension.WasLocked()) {
+        // or we manually lock if this is a fresh undress. Not for the player: the lock is
+        // a grip on an NPC the game would otherwise redress, and nothing redresses the
+        // player behind their back.
+        if (!suspension.WasLocked() && !actor->IsPlayerRef()) {
             OutfitLockManager::GetSingleton()->Lock(actor);
         }
 
@@ -457,7 +463,7 @@ private:
 
         std::vector<std::string> wornKeys;
         for (auto* armor : ItemEquipHelper::GetInventoryItems<RE::TESObjectARMO>(actor)) {
-            if (!armor || !ItemEquipHelper::IsArmorEquipped(actor, armor)) continue;
+            if (!armor || !ItemEquipHelper::IsArmorEquippedOrPending(actor, armor)) continue;
             if (ItemEquipHelper::IsBodyPart(armor)) continue;
             // Same rule as the outfit snapshot: a device is remembered by its inventory
             // half, and the rendered half comes back with it.

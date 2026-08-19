@@ -231,12 +231,11 @@ namespace ItemEquipHelper
         return result;
     }
 
-    // === Queued equips ===
+    // === Equips and unequips the engine has not applied yet ===
     //
     // Every equip here goes out with a_queueEquip = true, so the engine does not apply it in
     // the call: it lands a frame or more later, and until it does the actor's inventory
-    // changes still say the item is not worn. Unequips pass false and take effect at once,
-    // which is why the asymmetry only ever bites on the way in.
+    // changes still say the item is not worn.
     //
     // So anything that snapshots what an actor is wearing in the same breath as dressing
     // them misses the piece it just put on. That is how the outfit lock came to strip a
@@ -246,13 +245,23 @@ namespace ItemEquipHelper
     // save immediately after the equip listed 5 items, none of them the bandolier, and
     // UnequipArmorExcept removed it 782ms later.
     //
-    // The intent is therefore recorded here, at the one place that issues the equip, for
+    // Removals have the mirror image of the problem, for a different reason. An engine
+    // unequip does take effect in the call, but a Devious Devices one does not: it is a
+    // zadlibs.UnlockDevice dispatched into the Papyrus VM, and DD gets round to clearing
+    // the worn flag some hundreds of milliseconds later. A snapshot taken in between still
+    // counts the device as worn, so it went back into the locked outfit and the reapply put
+    // it straight back on - the player took a piercing off and the lock gave it back.
+    // Verified in the log against Sybille Stentor and a Genital Piercing at 15:28:21.
+    //
+    // The intent is therefore recorded here, at the places that issue the change, for
     // readers that want "what is this actor going to be wearing" rather than "what is the
-    // engine showing this instant".
+    // engine showing this instant". Recording one direction cancels the other, so an item
+    // taken off and put back on again inside the window reads as on.
     namespace Pending
     {
-        // Long enough for a queued equip to reach the actor even on a loaded frame, short
-        // enough that an equip which never lands cannot pin a stale item into an outfit.
+        // Long enough for a queued equip - or a round trip through DD's Papyrus - to reach
+        // the actor even on a loaded frame, short enough that a change which never lands
+        // cannot pin a stale item into an outfit.
         constexpr auto kLifetime = std::chrono::seconds(5);
 
         using Clock = std::chrono::steady_clock;
@@ -263,10 +272,42 @@ namespace ItemEquipHelper
             std::unordered_map<RE::FormID, std::unordered_map<RE::FormID, Clock::time_point>> byActor;
         };
 
-        inline Registry& Get()
+        inline Registry& Equips()
         {
             static Registry registry;
             return registry;
+        }
+
+        inline Registry& Unequips()
+        {
+            static Registry registry;
+            return registry;
+        }
+
+        inline void Forget(Registry& registry, RE::FormID actorID, RE::FormID armorID)
+        {
+            std::lock_guard<std::mutex> lock(registry.mutex);
+            const auto actorEntry = registry.byActor.find(actorID);
+            if (actorEntry != registry.byActor.end()) {
+                actorEntry->second.erase(armorID);
+            }
+        }
+
+        // Whether this armour is still in flight. Expired entries are dropped on the way.
+        inline bool Holds(Registry& registry, RE::FormID actorID, RE::FormID armorID)
+        {
+            std::lock_guard<std::mutex> lock(registry.mutex);
+            const auto actorEntry = registry.byActor.find(actorID);
+            if (actorEntry == registry.byActor.end()) return false;
+
+            const auto item = actorEntry->second.find(armorID);
+            if (item == actorEntry->second.end()) return false;
+
+            if (Clock::now() - item->second > kLifetime) {
+                actorEntry->second.erase(item);
+                return false;
+            }
+            return true;
         }
     }
 
@@ -278,9 +319,12 @@ namespace ItemEquipHelper
     {
         if (!actor || !armor) return;
 
+        // Whatever this used to be, it is going back on.
+        Pending::Forget(Pending::Unequips(), actor->GetFormID(), armor->GetFormID());
+
         const auto slots = static_cast<std::uint32_t>(armor->GetSlotMask());
 
-        auto& registry = Pending::Get();
+        auto& registry = Pending::Equips();
         std::lock_guard<std::mutex> lock(registry.mutex);
         auto& items = registry.byActor[actor->GetFormID()];
 
@@ -297,13 +341,32 @@ namespace ItemEquipHelper
     inline void ClearPendingEquip(RE::Actor* actor, RE::TESObjectARMO* armor)
     {
         if (!actor || !armor) return;
+        Pending::Forget(Pending::Equips(), actor->GetFormID(), armor->GetFormID());
+    }
 
-        auto& registry = Pending::Get();
+    // Record that we have asked for this armour to come off and are waiting on somebody
+    // else to do it - in practice Devious Devices, whose removal path runs in Papyrus.
+    inline void NotePendingUnequip(RE::Actor* actor, RE::TESObjectARMO* armor)
+    {
+        if (!actor || !armor) return;
+
+        ClearPendingEquip(actor, armor);
+
+        auto& registry = Pending::Unequips();
         std::lock_guard<std::mutex> lock(registry.mutex);
-        const auto actorEntry = registry.byActor.find(actor->GetFormID());
-        if (actorEntry != registry.byActor.end()) {
-            actorEntry->second.erase(armor->GetFormID());
-        }
+        registry.byActor[actor->GetFormID()][armor->GetFormID()] = Pending::Clock::now();
+    }
+
+    inline bool IsPendingEquip(RE::Actor* actor, RE::TESObjectARMO* armor)
+    {
+        if (!actor || !armor) return false;
+        return Pending::Holds(Pending::Equips(), actor->GetFormID(), armor->GetFormID());
+    }
+
+    inline bool IsPendingUnequip(RE::Actor* actor, RE::TESObjectARMO* armor)
+    {
+        if (!actor || !armor) return false;
+        return Pending::Holds(Pending::Unequips(), actor->GetFormID(), armor->GetFormID());
     }
 
     // Armour this actor has been told to put on and the engine has not reported yet.
@@ -315,7 +378,7 @@ namespace ItemEquipHelper
 
         const auto now = Pending::Clock::now();
 
-        auto& registry = Pending::Get();
+        auto& registry = Pending::Equips();
         std::lock_guard<std::mutex> lock(registry.mutex);
         const auto actorEntry = registry.byActor.find(actor->GetFormID());
         if (actorEntry == registry.byActor.end()) return result;
@@ -336,6 +399,18 @@ namespace ItemEquipHelper
         }
 
         return result;
+    }
+
+    // What this actor is going to be wearing, for this one item. IsArmorEquipped answers
+    // for the frame the engine is showing; this folds in the changes we have asked for and
+    // are still waiting on, which is what anything drawing the player's own last click - a
+    // highlight in the wheel, say - has to read instead.
+    inline bool IsArmorEquippedOrPending(RE::Actor* actor, RE::TESObjectARMO* armor)
+    {
+        if (!actor || !armor) return false;
+        if (IsPendingUnequip(actor, armor)) return false;
+        if (IsPendingEquip(actor, armor)) return true;
+        return IsArmorEquipped(actor, armor);
     }
 
     // Transfer item from one actor to another
@@ -408,7 +483,11 @@ namespace ItemEquipHelper
         ClearPendingEquip(actor, armor);
 
         if (DeviceCompat::IsInventoryDevice(armor)) {
-            return DeviceCompat::Unequip(actor, armor);
+            // DD's removal runs in Papyrus and clears the worn flag long after this
+            // returns, so the intent is recorded for anything snapshotting in between.
+            if (!DeviceCompat::Unequip(actor, armor)) return false;
+            NotePendingUnequip(actor, armor);
+            return true;
         }
 
         UnequipItem(actor, armor);
