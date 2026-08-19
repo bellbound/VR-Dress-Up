@@ -676,10 +676,19 @@ struct Root : Container {
 // in-place texture swap whose load finishes a frame or two later no longer applies itself
 // through pointers to scene-graph nodes that may have been torn down in between, and a swap
 // the element has already been repainted past is dropped rather than applied over the top.
+//
+// 0.10.10.0 changed nothing in this header either. SetVRAnchor now clears the offset a
+// previous drag or hand-placement left on the root, so re-anchoring puts the menu at the
+// anchor as its callers have always assumed; and a grab whose root carries an anchor handle
+// lands that handle on the hand rather than the root's centre.
+//
+// 0.10.11.0 changed nothing in this header either. The font metrics loader now honours the
+// RFC-4180 quoting the mapping CSV's Character column uses, so the comma glyph is loaded
+// instead of being dropped from every label, tooltip and text node that contained one.
 constexpr uint32_t P3DUI_INTERFACE_VERSION =
     0 * 1000000 +
     10 * 10000 +
-    9 * 100 +
+    11 * 100 +
     0;
 
 struct Interface001 {

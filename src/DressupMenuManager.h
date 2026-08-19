@@ -1,6 +1,7 @@
 #pragma once
 
 #include <RE/Skyrim.h>
+#include <atomic>
 #include <memory>
 #include <Windows.h>
 #include "InventoryManager.h"
@@ -12,6 +13,7 @@
 #include "dressup/GalleryStateManager.h"
 #include "dressup/KeywordCategoryManager.h"
 #include "dressup/ItemEquipHelper.h"
+#include "dressup/PapyrusBridge.h"
 #include "openvr.h"
 #include "InputManager.h"
 
@@ -63,16 +65,22 @@ namespace Backdrop
     // row turning into a light show.
     constexpr Tint kCategorySelected = {0.45f, 0.68f, 1.00f, 1.00f, 1.90f};
 
-    // Every item in the wheel. The same plate the gallery row rests on: it was a third of
-    // this opaque and barely glowing, on the reasoning that dozens at once would drown out
-    // the items, but in the headset that read as no plate at all - the items floated
-    // against whatever the player happened to be standing in front of.
-    constexpr Tint kItem = kCategoryIdle;
+    // An item the actor is not wearing - the one a click will put on. Warm rather than one
+    // more step along the blue, because the gallery row already owns the blue and a
+    // brighter blue here would read as "selected" rather than "there for the taking".
+    //
+    // This is the loud one, and it is deliberately the *un*equipped state: a wheel of
+    // gear is a wheel of choices, so what stands out should be what a click would change,
+    // not what is already settled. Reading it the other way round meant a fully dressed
+    // NPC lit the whole spiral up and the pieces still on offer were the dim ones.
+    constexpr Tint kItemAvailable = {1.00f, 0.72f, 0.42f, 1.00f, 1.70f};
 
-    // An item the actor whose inventory this is already has on. Warm rather than one more
-    // step along the blue, because the whole wheel is now the neutral plate above and a
-    // brighter blue would read as "selected" rather than "worn" next to the gallery row.
-    constexpr Tint kItemEquipped = {1.00f, 0.72f, 0.42f, 1.00f, 1.70f};
+    // An item the actor already has on: the same near-grey plate an unpicked category
+    // rests on. It was a third of this opaque and barely glowing at one point, on the
+    // reasoning that dozens at once would drown out the items, but in the headset that
+    // read as no plate at all - the items floated against whatever the player happened to
+    // be standing in front of.
+    constexpr Tint kItemEquipped = kCategoryIdle;
 
     // The one place that puts a backdrop on an element, so every row agrees about which
     // mesh it is.
@@ -91,7 +99,7 @@ namespace Backdrop
 
     inline void ApplyItem(P3DUI::Element* element, bool equipped = false)
     {
-        Apply(element, kItemScale, equipped ? kItemEquipped : kItem);
+        Apply(element, kItemScale, equipped ? kItemEquipped : kItemAvailable);
     }
 }
 
@@ -135,6 +143,11 @@ public:
             RE::DebugNotification("[Dress Up VR] Incompatible 3DUI Version detected");
             RE::DebugNotification("[Dress Up VR] Please update Dress Up VR to the latest version");
         }
+
+        // The wheel is painted from what the actor has on, and half of that arrives after
+        // the click that caused it - see OnWornStateChanged.
+        InventoryManager::GetSingleton()->SetWornStateChangedCallback(
+            [this]() { OnWornStateChanged(); });
 
         spdlog::info("DressupMenuManager::Initialize - 3D UI subsystems initialized successfully (version {})", interfaceVersion);
         m_initialized = true;
@@ -492,18 +505,25 @@ private:
         const bool canRestore = !isLocked && targetActor &&
             OutfitLockManager::GetSingleton()->HasOutfit(
                 targetActor, OutfitLockManager::kPreUnlockOutfitName);
-        std::wstring lockTooltip = isLocked
-            ? L"Unlock (" + ToWide(npcName) + L" is Locked)"
+        // What the click is about to do, not what the icon already shows. "Jora is Locked"
+        // beside a lit padlock was the state twice over and said nothing about the
+        // consequence - and unlocking is the one button in this row that throws a dressing
+        // session away: it deletes the stored outfit, stops defending it, and hands the NPC
+        // back to whatever dresses them normally, which with the outfit backend on means
+        // their own clothes go back on there and then. Worth the warning, and worth saying
+        // in the same breath that the next press undoes it.
+        const wchar_t* lockTooltip = isLocked
+            ? L"Unlock (drops this outfit)"
             : canRestore
-                ? L"Lock (puts the outfit you unlocked back on)"
-                : L"Lock (" + ToWide(npcName) + L" is Unlocked)";
+                ? L"Relock (outfit back on)"
+                : L"Lock this outfit";
         std::string lockIcon = isLocked
             ? "textures\\VRDressup\\lock_highlight.dds"
             : "textures\\VRDressup\\unlock.dds";
 
         P3DUI::ElementConfig lockConfig = P3DUI::ElementConfig::Default("lock_button");
         lockConfig.texturePath = lockIcon.c_str();
-        lockConfig.tooltip = lockTooltip.c_str();
+        lockConfig.tooltip = lockTooltip;
         lockConfig.scale = 1.2f;
         lockConfig.facingMode = P3DUI::FacingMode::None;
 
@@ -657,9 +677,14 @@ private:
             }
 
             auto* item = m_api->CreateElement(itemConfig);
+
+            // Recorded even when creation failed, so m_itemElements stays index-aligned
+            // with the list it was built from: RefreshItemHighlight walks the two in step,
+            // and one missing element would shift every plate after it onto the wrong
+            // item. Backdrop::Apply ignores a null element.
+            Backdrop::ApplyItem(item, IsItemWorn(inventoryItem));
+            m_itemElements.push_back(item);
             if (item) {
-                Backdrop::ApplyItem(item, IsItemWorn(inventoryItem));
-                m_itemElements.push_back(item);
                 m_itemSpiral->AddChild(item);
             }
         }
@@ -683,18 +708,84 @@ private:
         return false;
     }
 
+    // Same question for a gallery plate, in either gallery - mod categories and keyword
+    // categories share one spiral and one click path.
+    //
+    // Asked of the target actor rather than of GetSourceActor: the wheel may be listing
+    // the player's own pack, but a gallery pick is conjured onto the NPC being dressed
+    // either way, which is what InventoryManager::EquipFromMod does with it.
+    bool IsGalleryArmorWorn(RE::TESObjectARMO* armor) const
+    {
+        RE::Actor* target = InventoryManager::GetSingleton()->GetTargetActor();
+        if (!armor || !target) return false;
+
+        return ItemEquipHelper::IsArmorEquippedOrPending(target, armor);
+    }
+
     // Re-tint the wheel in place after a click, the way RefreshCategoryHighlight does for
     // the gallery row. Rebuilding the spiral instead would drop every element and recreate
     // it - dozens of models re-read from disk - to change one plate's colour.
     void RefreshItemHighlight()
     {
-        if (IsShowingGalleryItems()) return;  // gallery plates carry no worn state
-
         // Parenthesised: Windows.h defines min as a macro.
+        if (IsShowingGalleryItems()) {
+            const size_t count = (std::min)(m_itemElements.size(), m_galleryArmorList.size());
+            for (size_t i = 0; i < count; ++i) {
+                Backdrop::ApplyItem(m_itemElements[i], IsGalleryArmorWorn(m_galleryArmorList[i]));
+            }
+            return;
+        }
+
         const size_t count = (std::min)(m_itemElements.size(), m_currentItemList.size());
         for (size_t i = 0; i < count; ++i) {
             Backdrop::ApplyItem(m_itemElements[i], IsItemWorn(m_currentItemList[i]));
         }
+    }
+
+    // A gear change has landed on an actor the wheel is showing.
+    //
+    // The repaint a click does is a prediction: the equip it issued is queued, and the
+    // removal the engine does to make room for it has not happened yet, so the plate of
+    // whatever was in that biped slot is painted one state out of date and stays that way
+    // until something repaints it again - which, before this, was the next click. That is
+    // the "the orbs only catch up when I equip the next thing" of it.
+    //
+    // Arrives on the game thread from inside the engine's own equip processing, and an
+    // outfit reapply announces dozens in a row, so the repaint is coalesced onto a single
+    // task rather than run here: one repaint per drain no matter how many events fed it.
+    void OnWornStateChanged()
+    {
+        if (!IsMenuOpen()) return;
+
+        // Already one in flight - it will read the state after this event too.
+        if (m_highlightRepaintQueued.exchange(true)) return;
+
+        auto* task = SKSE::GetTaskInterface();
+        if (!task) {
+            m_highlightRepaintQueued = false;
+            return;
+        }
+
+        task->AddTask([this]() {
+            m_highlightRepaintQueued = false;
+            if (!IsMenuOpen()) return;
+            RefreshItemHighlight();
+        });
+    }
+
+    // One repaint just past the window a queued equip is believed for.
+    //
+    // An equip the engine decides against - the slot is held by something it will not take
+    // off, or the item is not really there - lands nowhere and announces nothing, so
+    // OnWornStateChanged never hears about it. The plate was lit from the pending marker
+    // the click wrote; that marker expires after ItemEquipHelper's grace, and this is what
+    // turns the plate back into an offer once it has.
+    void ScheduleSettleRepaint()
+    {
+        PapyrusBridge::RunAfterMs(kSettleRepaintMs, [this]() {
+            if (!IsMenuOpen()) return;
+            RefreshItemHighlight();
+        });
     }
 
     // Refresh item spiral with armor from the active gallery category (mod or keyword)
@@ -720,7 +811,12 @@ private:
         // Add armor items to spiral
         for (size_t i = 0; i < m_galleryArmorList.size(); ++i) {
             auto* armor = m_galleryArmorList[i];
-            if (!armor) continue;
+            if (!armor) {
+                // Placeholder, so m_itemElements stays index-aligned with the armour list
+                // the clicks and the highlight both index by.
+                m_itemElements.push_back(nullptr);
+                continue;
+            }
 
             std::string itemId = "item_" + std::to_string(i);
             std::wstring itemTooltip = ToWide(armor->GetFullName());
@@ -734,8 +830,16 @@ private:
             itemConfig.modelPath = modelPath.c_str();
 
             auto* item = m_api->CreateElement(itemConfig);
+
+            // Gallery plates carry the same worn state the inventory wheel does. They did
+            // not before, on the assumption that a gallery is a catalogue of things the
+            // actor does not have - but a click puts the piece on and leaves it in the
+            // list, so without this the one plate you had just used looked no different
+            // from the 559 you had not, and there was no way to tell what a second click
+            // would take off again.
+            Backdrop::ApplyItem(item, IsGalleryArmorWorn(armor));
+            m_itemElements.push_back(item);
             if (item) {
-                Backdrop::ApplyItem(item);
                 m_itemSpiral->AddChild(item);
             }
         }
@@ -1271,6 +1375,16 @@ public:
             m_galleryRow->SetVisible(false);
         }
 
+        // The gallery marks die with the session that made them.
+        //
+        // A mark means "the player is trying this on"; anything still worn when they close
+        // the wheel is a piece they have settled on, and must never be deleted by a later
+        // unequip - an undress, a scene, another mod, or a menu session hours afterwards.
+        // Before Reset(), which is what clears the target actor.
+        if (auto* target = InventoryManager::GetSingleton()->GetTargetActor()) {
+            OutfitLockManager::GetSingleton()->ReleaseGalleryItems(target);
+        }
+
         // Reset inventory manager state (clears target actor and tracking)
         InventoryManager::GetSingleton()->Reset();
 
@@ -1373,8 +1487,15 @@ private:
             auto* armor = m_galleryArmorList[itemIndex];
             if (armor) {
                 invMgr->EquipFromMod(armor);
-                spdlog::info("DressupMenuManager::OnItemSelected - Equipped gallery armor '{}'", armor->GetFullName());
+                spdlog::info("DressupMenuManager::OnItemSelected - Toggled gallery armor '{}'", armor->GetFullName());
             }
+
+            // The plate the player just clicked has changed state - and so has any other
+            // plate in the same slot, because putting one piece on takes the other off.
+            // Both are predictions; OnWornStateChanged corrects them once the engine has
+            // actually moved, and the sweep covers an equip it never gets round to.
+            RefreshItemHighlight();
+            ScheduleSettleRepaint();
 
             // Refresh handle row if lock state or undress state changed
             bool isLocked = invMgr->IsNpcLocked();
@@ -1414,6 +1535,7 @@ private:
             // The list is the same; only what the NPC has on has changed.
             RefreshItemHighlight();
         }
+        ScheduleSettleRepaint();
 
         // Refresh handle row if lock state or undress state changed
         bool isLocked = invMgr->IsNpcLocked();
@@ -1421,6 +1543,10 @@ private:
             PopulateHandleRow();
         }
     }
+
+    // Just past ItemEquipHelper's kEquipGrace, so the sweep reads the state the grace has
+    // already given up on rather than racing it.
+    static constexpr std::int32_t kSettleRepaintMs = 1100;
 
     P3DUI::Interface001* m_api = nullptr;
     P3DUI::Root* m_root = nullptr;
@@ -1450,6 +1576,10 @@ private:
     // highlight can be re-tinted without rebuilding the spiral. Same lifetime rule as
     // m_categoryElements: cleared wherever the container it holds is.
     std::vector<P3DUI::Element*> m_itemElements;
+
+    // Whether a repaint is already queued for this drain. Written from the equip event on
+    // the game thread and cleared by the task it guards.
+    std::atomic<bool> m_highlightRepaintQueued{false};
 
     std::vector<ModCategoryInfo> m_categoryList;         // Mods currently in the gallery row
     std::vector<KeywordCategoryInfo> m_keywordCategoryList;  // Keyword categories currently in the gallery row

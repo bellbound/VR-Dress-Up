@@ -172,6 +172,20 @@ public:
     // Unmark a gallery item (called after destruction)
     void UnmarkGalleryItem(RE::Actor* actor, RE::FormID itemID);
 
+    // Drop every gallery mark this actor is carrying, making the pieces ordinary
+    // inventory. Pass null to release every actor.
+    //
+    // The mark means "the player is trying this on; bin it when they take it off again",
+    // and that is only true for as long as the wheel they picked it from is open. It used
+    // to outlive the menu, and a piece the player had settled on hours earlier was still
+    // armed: Vendressa's Wayward Knight Set Top was marked at 20:27:00, kept through the
+    // close at 20:45:12, and then deleted out of her inventory at 20:53:44 by the undress
+    // button in a completely different menu session - with the redress that was meant to
+    // put it back already holding a reference to an item that no longer existed. Closing
+    // the wheel is the player saying they are done trying things on, so the marks go with
+    // it. See DressupMenuManager::CloseMenu.
+    void ReleaseGalleryItems(RE::Actor* actor);
+
     // === Default Outfit (Vanilla Restore) ===
 
     // Check if actor has a saved default (vanilla) outfit
@@ -248,6 +262,34 @@ public:
     // failing to dress the actor.
     uint32_t EnsureOutfitItemsInInventory(RE::Actor* actor, const std::string& outfitName);
 
+    // === Menu-edit reconciliation ===
+    //
+    // A menu edit used to end by snapshotting everything the actor had on and calling
+    // that the locked outfit. That is only true if what they had on was ours to begin
+    // with. It often is not: while the equip-storm breaker is backed off, or inside the
+    // reapply delay, a locked NPC can be wearing gear some other mod put there - and one
+    // click then wrote that gear into the lock permanently. The pair below replaces the
+    // snapshot with a delta, and gives the player a clean actor to edit in the first
+    // place.
+
+    // FormIDs of the armour the actor is wearing right now, sorted and de-duplicated.
+    // Same view of "worn" as SaveOutfit uses, queued equips and all.
+    std::vector<RE::FormID> SnapshotWornArmor(RE::Actor* actor) const;
+
+    // Put a locked actor back into their locked outfit before the player starts editing
+    // it, so they are not dressing somebody else's gear. Clears any equip-storm or
+    // reapply stand-down first: the player has walked up and opened the wheel on this
+    // actor, which is worth one reapply even mid-storm. No-op when they are already
+    // wearing the locked set.
+    void ReconcileBeforeUserEdit(RE::Actor* actor);
+
+    // Fold one menu edit into the stored "locked" outfit, as the difference between what
+    // the actor wore when the edit began and what they wear now. Anything worn on both
+    // sides is left exactly as the stored outfit already had it, so gear the edit did not
+    // touch can neither enter nor leave the lock. Returns false if the actor is no longer
+    // locked.
+    bool UpdateLockedOutfitFromEdit(RE::Actor* actor, const std::vector<RE::FormID>& wornBefore);
+
 private:
     OutfitLockManager() = default;
     ~OutfitLockManager() = default;
@@ -316,6 +358,17 @@ private:
 
     // Is this actor currently backed off? Cheap; used to skip reapplies.
     bool IsInEquipBackoff(RE::FormID actorID) const;
+
+    // Drop a tripped stand-down for this actor - both the per-event storm breaker and the
+    // reapply leaky bucket. Returns true if either was active. Only the player opening the
+    // wheel on the actor calls this: it is a deliberate override of a limiter that exists
+    // to keep us out of a fight with another mod, not something to do on a timer.
+    bool ClearEquipBackoff(RE::FormID actorID);
+
+    // How long a reconcile stands as done. Equips are queued, so the actor still looks
+    // wrong for a frame or two after one; without this a second menu open in that window
+    // would fire another full reapply.
+    static constexpr std::int64_t kUserEditReconcileDebounceMs = 1000;
 
     // Coalesce location-change reapplies. Door transitions and fast travel fire these in
     // bursts, and a full reapply per burst is what turns 2 followers into 24 equip events.
@@ -417,10 +470,18 @@ private:
 
 // RAII helper for outfit modifications on potentially locked actors
 // - Tracks whether actor was locked before changes
-// - Re-saves the locked outfit on scope exit to capture changes
+// - Folds the changes made inside the scope into the locked outfit on exit
 // Usage: ScopedLockSuspension suspension(actor);
 //        ... make outfit changes ...
 //        if (!suspension.WasLocked()) { AutoLockNpc(); }
+//
+// The exit used to call SaveOutfit, i.e. snapshot everything worn and call that the lock.
+// It no longer does. A snapshot cannot tell the piece the player just clicked from a piece
+// another mod put on while we were backed off, and Vendressa's log is what that costs: the
+// equip-storm breaker stood down for 30s, the engine re-dressed her out of her own
+// inventory, and the next click wrote all seven of those pieces into her locked outfit -
+// 7 items in, 12 items out - with no way back. Only what this scope actually changed goes
+// in or out now; see UpdateLockedOutfitFromEdit.
 class ScopedLockSuspension
 {
 public:
@@ -428,19 +489,26 @@ public:
         : m_actor(actor)
         , m_wasLocked(actor ? OutfitLockManager::GetSingleton()->IsLocked(actor) : false)
     {
-        OutfitLockManager::GetSingleton()->BeginUserEdit();
+        auto* mgr = OutfitLockManager::GetSingleton();
+
+        // Opened before the snapshot: whatever we do below is ours, and the watcher must
+        // not read it as somebody else undressing the actor.
+        mgr->BeginUserEdit();
+
+        if (m_actor && m_wasLocked) {
+            m_wornBefore = mgr->SnapshotWornArmor(m_actor);
+        }
     }
 
     ~ScopedLockSuspension()
     {
-        // Re-save the locked outfit to capture any changes made during this scope
         if (m_actor && m_wasLocked) {
             auto* mgr = OutfitLockManager::GetSingleton();
-            mgr->SaveOutfit(m_actor, "locked");
+            mgr->UpdateLockedOutfitFromEdit(m_actor, m_wornBefore);
             mgr->PromoteLockToOutfitForm(m_actor);
         }
 
-        // Ends last: the re-save above is what makes the new look the locked one, and the
+        // Ends last: the update above is what makes the new look the locked one, and the
         // watcher must not see the scope's own equips before that has happened.
         OutfitLockManager::GetSingleton()->EndUserEdit();
     }
@@ -455,4 +523,8 @@ public:
 private:
     RE::Actor* m_actor;
     bool m_wasLocked;
+
+    // What the actor had on when the scope opened. Empty when they were not locked, in
+    // which case the exit has nothing to fold into and the caller locks from scratch.
+    std::vector<RE::FormID> m_wornBefore;
 };

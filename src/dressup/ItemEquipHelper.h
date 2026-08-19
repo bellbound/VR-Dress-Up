@@ -123,6 +123,24 @@ namespace ItemEquipHelper
         return !HasWornMeshForSex(armor, RE::SEXES::kFemale);
     }
 
+    // Is The New Gentleman in this load order? Answered once, because the only way to ask
+    // walks the whole file list and IsBodyPart below runs per armour per snapshot.
+    //
+    // Deliberately not cached until the data handler exists, so a call made before load
+    // cannot pin the wrong answer for the session.
+    inline bool IsTngLoaded()
+    {
+        static int cached = -1;  // -1 unknown, 0 no, 1 yes
+        if (cached >= 0) return cached == 1;
+
+        auto* handler = RE::TESDataHandler::GetSingleton();
+        if (!handler) return false;
+
+        cached = (handler->LookupModByName("TheNewGentleman.esp") ||
+                  handler->LookupModByName("TheNewGentleman.esm")) ? 1 : 0;
+        return cached == 1;
+    }
+
     // Biped slot 52 is where The New Gentleman - and SOS before it - puts its genital
     // addons. Those are body parts rather than clothing: TNG equips and unequips them
     // itself in reaction to what the NPC is wearing, so anything we do with them is
@@ -130,14 +148,34 @@ namespace ItemEquipHelper
     // outfit that triggered them, so a snapshot can catch one by accident and then keep
     // putting it back on long after the player removed it in the TNG menu.
     //
-    // Verified against the record: TNG_GenitalCover (0xAFF~TheNewGentleman.esp) has
-    // BOD2 = 0x00400000, slot 52 and nothing else.
+    // But slot 52 is not TNG's alone, and testing the slot by itself was wrong far more
+    // often than it was right. Underwear mods park panties and briefs there precisely
+    // because nothing else claims it: "Mage Novice Panty" (0xB56~[Caenarvon] Magecore.esp)
+    // is BOD2 = 0x00400000, slot 52 and nothing else - byte for byte what TNG_GenitalCover
+    // (0xAFF~TheNewGentleman.esp) looks like. Every such piece was invisible to the outfit
+    // system: never stored in 'locked' or 'preundress', so never put back by a reapply or
+    // a redress, while still being destroyed as a gallery item when it came off. The
+    // player took an NPC's underwear off once and it was gone.
+    //
+    // So the slot is the precondition and TNG's own keywords are the test. TNG tags each
+    // addon with TNG_AddonMale / TNG_AddonFemale and its cover with TNG_Ignored; nothing
+    // else on slot 52 carries those. Without TNG installed there is no such tag to read
+    // and nothing of TNG's to protect, so the slot alone has to do - that is the old
+    // behaviour, kept for load orders running bare SOS.
     inline bool IsBodyPart(RE::TESObjectARMO* armor)
     {
         constexpr auto kBodyPartSlots = static_cast<std::uint32_t>(1u << (52 - 30));
 
         if (!armor) return false;
-        return (static_cast<std::uint32_t>(armor->GetSlotMask()) & kBodyPartSlots) != 0;
+        if ((static_cast<std::uint32_t>(armor->GetSlotMask()) & kBodyPartSlots) == 0) {
+            return false;
+        }
+
+        if (!IsTngLoaded()) return true;
+
+        return armor->HasKeywordString("TNG_AddonMale") ||
+               armor->HasKeywordString("TNG_AddonFemale") ||
+               armor->HasKeywordString("TNG_Ignored");
     }
 
     // Is this exact item worn?
@@ -259,10 +297,26 @@ namespace ItemEquipHelper
     // taken off and put back on again inside the window reads as on.
     namespace Pending
     {
-        // Long enough for a queued equip - or a round trip through DD's Papyrus - to reach
-        // the actor even on a loaded frame, short enough that a change which never lands
-        // cannot pin a stale item into an outfit.
+        // Long enough for a round trip through DD's Papyrus to reach the actor even on a
+        // loaded frame, short enough that a change which never lands cannot pin a stale
+        // item into an outfit. Removals only - see kEquipGrace for the other direction.
         constexpr auto kLifetime = std::chrono::seconds(5);
+
+        // How long a queued equip is believed before the engine's answer is taken as
+        // final. Measured: an equip issued at 14:26:56.513 was worn by 14:26:57.033, so a
+        // loaded frame wants most of a second; a queued equip that has not landed inside
+        // this window is one the engine has decided against rather than one still moving.
+        //
+        // This used to be kLifetime, and a flat timer was wrong in the one case that
+        // mattered most. An equip the engine silently drops - because the biped slot it
+        // wants is held by something the engine is not going to take off, or because the
+        // item is not in the inventory at all - stayed "in flight" for a full five
+        // seconds, and everything reading intent rather than truth called the piece worn
+        // for all of it. The wheel lit the plate; the next click read as "take it off";
+        // the toggle asked the engine instead, got "not worn", and equipped it again.
+        // Every click did that, and the piece never moved. Daegon's Elven Sentry Cuirass
+        // and Sabatons spent twenty seconds that way.
+        constexpr auto kEquipGrace = std::chrono::milliseconds(1000);
 
         using Clock = std::chrono::steady_clock;
 
@@ -357,10 +411,41 @@ namespace ItemEquipHelper
         registry.byActor[actor->GetFormID()][armor->GetFormID()] = Pending::Clock::now();
     }
 
+    // Whether a queued equip is still worth believing.
+    //
+    // Inside the grace the engine has not had a fair chance and the intent stands. Past
+    // it the engine's answer is final either way, so the marker is dropped: if the equip
+    // landed the worn flag says so and the marker has nothing left to add, and if it did
+    // not the marker was a lie. Callers all fold this together with IsArmorEquipped, so
+    // dropping it never loses a piece that is genuinely on.
+    inline bool PendingEquipInFlight(RE::Actor* actor, RE::TESObjectARMO* armor,
+        Pending::Clock::time_point issued)
+    {
+        if (Pending::Clock::now() - issued <= Pending::kEquipGrace) return true;
+
+        ClearPendingEquip(actor, armor);
+        return false;
+    }
+
     inline bool IsPendingEquip(RE::Actor* actor, RE::TESObjectARMO* armor)
     {
         if (!actor || !armor) return false;
-        return Pending::Holds(Pending::Equips(), actor->GetFormID(), armor->GetFormID());
+
+        // Read the timestamp out under the lock and judge it outside: the verdict can
+        // erase the entry, and the registry mutex is not recursive.
+        Pending::Clock::time_point issued;
+        {
+            auto& registry = Pending::Equips();
+            std::lock_guard<std::mutex> lock(registry.mutex);
+            const auto actorEntry = registry.byActor.find(actor->GetFormID());
+            if (actorEntry == registry.byActor.end()) return false;
+
+            const auto item = actorEntry->second.find(armor->GetFormID());
+            if (item == actorEntry->second.end()) return false;
+            issued = item->second;
+        }
+
+        return PendingEquipInFlight(actor, armor, issued);
     }
 
     inline bool IsPendingUnequip(RE::Actor* actor, RE::TESObjectARMO* armor)
@@ -370,32 +455,37 @@ namespace ItemEquipHelper
     }
 
     // Armour this actor has been told to put on and the engine has not reported yet.
-    // Expired and unresolvable entries are pruned on the way out.
+    // Settled and unresolvable entries are pruned on the way out.
     inline std::vector<RE::TESObjectARMO*> GetPendingEquips(RE::Actor* actor)
     {
         std::vector<RE::TESObjectARMO*> result;
         if (!actor) return result;
 
-        const auto now = Pending::Clock::now();
+        // Snapshot under the lock, judge outside it: the verdict re-enters the registry
+        // to drop entries the engine has settled, and the mutex is not recursive.
+        std::vector<std::pair<RE::TESObjectARMO*, Pending::Clock::time_point>> candidates;
+        {
+            auto& registry = Pending::Equips();
+            std::lock_guard<std::mutex> lock(registry.mutex);
+            const auto actorEntry = registry.byActor.find(actor->GetFormID());
+            if (actorEntry == registry.byActor.end()) return result;
 
-        auto& registry = Pending::Equips();
-        std::lock_guard<std::mutex> lock(registry.mutex);
-        const auto actorEntry = registry.byActor.find(actor->GetFormID());
-        if (actorEntry == registry.byActor.end()) return result;
+            auto& items = actorEntry->second;
+            for (auto it = items.begin(); it != items.end();) {
+                auto* armor = RE::TESForm::LookupByID<RE::TESObjectARMO>(it->first);
+                if (!armor) {
+                    it = items.erase(it);
+                    continue;
+                }
+                candidates.emplace_back(armor, it->second);
+                ++it;
+            }
+        }
 
-        auto& items = actorEntry->second;
-        for (auto it = items.begin(); it != items.end();) {
-            if (now - it->second > Pending::kLifetime) {
-                it = items.erase(it);
-                continue;
+        for (const auto& [armor, issued] : candidates) {
+            if (PendingEquipInFlight(actor, armor, issued)) {
+                result.push_back(armor);
             }
-            auto* armor = RE::TESForm::LookupByID<RE::TESObjectARMO>(it->first);
-            if (!armor) {
-                it = items.erase(it);
-                continue;
-            }
-            result.push_back(armor);
-            ++it;
         }
 
         return result;
@@ -499,7 +589,13 @@ namespace ItemEquipHelper
     {
         if (!actor || !armor) return false;
 
-        bool wasEquipped = IsArmorEquipped(actor, armor);
+        // Asked of the intent, not of the engine, so that the click acts on the state the
+        // player can see. The wheel tints its plates from IsArmorEquippedOrPending; a
+        // toggle reading the worn flag instead disagreed with the plate for as long as an
+        // equip was in flight, and a click on a lit plate came out as another equip
+        // rather than the removal it looked like. A second click inside the window now
+        // cancels the equip, which is what clicking a lit plate means.
+        bool wasEquipped = IsArmorEquippedOrPending(actor, armor);
 
         if (wasEquipped) {
             if (!UnequipArmor(actor, armor)) {

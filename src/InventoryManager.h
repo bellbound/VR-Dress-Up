@@ -67,12 +67,42 @@ public:
         m_initialized = false;
     }
 
+    // Told whenever a gear change has actually landed on an actor the wheel is painting
+    // plates for. Set by the menu, which is above this class and cannot be called directly.
+    using WornStateChangedCallback = std::function<void()>;
+
+    void SetWornStateChangedCallback(WornStateChangedCallback callback)
+    {
+        m_onWornStateChanged = std::move(callback);
+    }
+
     // Process equip events - return transferred items to player when NPC unequips them
     RE::BSEventNotifyControl ProcessEvent(
         const RE::TESEquipEvent* a_event,
         RE::BSTEventSource<RE::TESEquipEvent>*) override
     {
-        if (!a_event || m_processingReturn || a_event->equipped) {
+        if (!a_event) {
+            return RE::BSEventNotifyControl::kContinue;
+        }
+
+        // The wheel paints its plates from what these actors have on, so every gear change
+        // that reaches one of them moves a plate - including the ones nobody clicked for.
+        // Equipping into an occupied biped slot makes the engine take the occupant off,
+        // and that removal is announced here and nowhere else: the click that caused it
+        // repainted the wheel a frame or two earlier, back when the displaced piece was
+        // still on, and left its plate reading "worn" until the next click happened to
+        // repaint it.
+        //
+        // Said ahead of every filter below because those exist for the ghost-item
+        // bookkeeping. Equips are none of its business but they are the wheel's, and an
+        // outfit reapply's unequips are real changes to the plates even when they are ours.
+        if (const auto* changed = a_event->actor.get(); IsShownActor(changed)) {
+            if (m_onWornStateChanged) {
+                m_onWornStateChanged();
+            }
+        }
+
+        if (m_processingReturn || a_event->equipped) {
             return RE::BSEventNotifyControl::kContinue;
         }
 
@@ -109,6 +139,15 @@ public:
         m_targetActor = actor;
         spdlog::info("InventoryManager::SetTargetActor - Set target to: {}",
             actor ? actor->GetName() : "null");
+
+        // Before the spiral is built, not after: if something else has dressed this NPC
+        // since we last looked - a scene, a bath mod, the engine re-equipping their own
+        // gear while the equip-storm breaker was standing down - then the wheel would
+        // list that gear as theirs and every edit would be made on top of it. Puts the
+        // locked outfit back first, so the player edits what they locked. No-op for an
+        // unlocked actor, or one already wearing the locked set.
+        OutfitLockManager::GetSingleton()->ReconcileBeforeUserEdit(actor);
+
         m_transaction.CapturePlayerEquipment();
     }
 
@@ -120,6 +159,20 @@ public:
     RE::Actor* GetSourceActor() const
     {
         return m_targetIsPlayer ? RE::PlayerCharacter::GetSingleton() : m_targetActor;
+    }
+
+    // Whether this reference is one the open wheel is showing state for: the actor whose
+    // inventory the spiral lists, and the actor a gallery pick lands on. The same actor
+    // most of the time, and different exactly in player mode.
+    bool IsShownActor(const RE::TESObjectREFR* ref) const
+    {
+        if (!ref || !m_targetActor) return false;
+
+        const RE::FormID id = ref->GetFormID();
+        if (id == m_targetActor->GetFormID()) return true;
+
+        const auto* source = GetSourceActor();
+        return source && id == source->GetFormID();
     }
 
     void SetTargetIsPlayer(bool isPlayer)
@@ -432,6 +485,33 @@ public:
         // Suspend lock enforcement while we make changes
         ScopedLockSuspension suspension(m_targetActor);
 
+        // Click a piece the actor already has on to take it off again.
+        //
+        // Without this branch the gallery had no way to remove anything: GetWornInSlot
+        // below hands back the very item that was clicked, ClearSlotFor takes it off, and
+        // the equip at the end puts it straight back - so the piece never came off, while
+        // the unequip in the middle had already told OutfitLockManager to destroy it as a
+        // gallery item. The player got a piece that would not come off and then vanished
+        // out of the NPC's inventory a frame later. Both galleries - mod categories and
+        // keyword categories - come through here, so both get the toggle.
+        if (ItemEquipHelper::IsArmorEquippedOrPending(m_targetActor, armor)) {
+            if (!ItemEquipHelper::UnequipArmor(m_targetActor, armor)) {
+                spdlog::info("InventoryManager::EquipFromMod - '{}' stays on {}: the mod that "
+                    "owns it will not release it", armor->GetFullName(), m_targetActor->GetName());
+                return;
+            }
+
+            ClearUndressStateOnGearChange();
+
+            if (!suspension.WasLocked()) {
+                AutoLockNpc();
+            }
+
+            spdlog::info("InventoryManager::EquipFromMod - Unequipped '{}' from {}",
+                armor->GetFullName(), m_targetActor->GetName());
+            return;
+        }
+
         // Check if NPC already has this armor in inventory
         bool hasInInventory = ItemEquipHelper::HasItemInInventory(m_targetActor, armor);
 
@@ -655,4 +735,7 @@ private:
     DressupTransaction m_transaction;
     bool m_initialized = false;
     bool m_processingReturn = false;
+
+    // Set once, by the menu, and read from the equip event on the game thread.
+    WornStateChangedCallback m_onWornStateChanged;
 };

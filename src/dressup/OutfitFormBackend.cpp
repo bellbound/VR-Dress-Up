@@ -181,9 +181,21 @@ bool OutfitFormBackend::IsApplying() const
     return NowMs() < m_applyUntilMs.load(std::memory_order_relaxed);
 }
 
-void OutfitFormBackend::DispatchSetOutfit(RE::Actor* actor, RE::BGSOutfit* outfit)
+void OutfitFormBackend::DispatchSetOutfit(RE::Actor* actor, RE::BGSOutfit* outfit,
+    bool guardInventory)
 {
     SeverActionsCompat::SuspendLock(actor);
+
+    // Snapshotted before the call, because the point of the guard is to compare against
+    // what the record held when the engine was handed it.
+    std::vector<RE::FormID> guarded;
+    if (guardInventory && outfit) {
+        guarded.reserve(outfit->outfitItems.size());
+        for (auto* item : outfit->outfitItems) {
+            if (item) guarded.push_back(item->GetFormID());
+        }
+    }
+    const RE::FormID actorID = actor ? actor->GetFormID() : 0;
 
     m_applyUntilMs.store(NowMs() + kApplySettleMs, std::memory_order_relaxed);
     PapyrusBridge::CallActorSetOutfit(actor, outfit, false);
@@ -192,6 +204,53 @@ void OutfitFormBackend::DispatchSetOutfit(RE::Actor* actor, RE::BGSOutfit* outfi
     // implicit UnequipAll reaches Papyrus well after this call returns, so resuming here
     // would hand the SeverActions debounce exactly the trigger the suspend is for.
     SeverActionsCompat::ResumeLockAfterMs(actor, kApplySettleMs);
+
+    if (!guarded.empty() && actorID != 0) {
+        // Behind the same window: the removals ride in on the engine's queue and are not
+        // done when this returns.
+        PapyrusBridge::RunAfterMs(static_cast<std::int32_t>(kApplySettleMs),
+            [actorID, guarded = std::move(guarded)]() {
+                VerifyInventoryAfterDispatch(actorID, guarded);
+            });
+    }
+}
+
+// Put back anything the outfit change took out of the actor's inventory.
+//
+// An outfit change strips the items the previous application added, and whether it adds
+// them back depends on engine state we do not control - notably it does nothing at all
+// when the outfit form is the one the actor already had. Both halves of that are the
+// engine's business; ours is that the player's NPC must not quietly lose gear over it.
+//
+// A backstop, not the fix. Apply no longer re-dispatches for a content change, which is
+// what was driving the loss; this catches the dispatches that do still have to happen -
+// the first assignment, and the re-assignment after a load.
+void OutfitFormBackend::VerifyInventoryAfterDispatch(RE::FormID actorID,
+    const std::vector<RE::FormID>& itemIDs)
+{
+    auto* actor = RE::TESForm::LookupByID<RE::Actor>(actorID);
+    if (!actor) return;
+
+    const auto counts = actor->GetInventoryCounts();
+
+    std::uint32_t restored = 0;
+    for (const RE::FormID itemID : itemIDs) {
+        auto* armor = RE::TESForm::LookupByID<RE::TESObjectARMO>(itemID);
+        if (!armor) continue;
+
+        const auto found = counts.find(static_cast<RE::TESBoundObject*>(armor));
+        if (found != counts.end() && found->second > 0) continue;
+
+        actor->AddObjectToContainer(armor, nullptr, 1, nullptr);
+        ++restored;
+        spdlog::warn("OutfitFormBackend - the outfit change took '{}' (0x{:08X}) out of "
+            "'{}'s inventory; put it back", armor->GetFullName(), itemID, actor->GetName());
+    }
+
+    if (restored > 0) {
+        spdlog::warn("OutfitFormBackend - restored {} item(s) the engine removed behind a "
+            "SetOutfit on '{}'", restored, actor->GetName());
+    }
 }
 
 bool OutfitFormBackend::Apply(RE::Actor* actor, const std::vector<std::string>& formKeys)
@@ -237,17 +296,33 @@ bool OutfitFormBackend::Apply(RE::Actor* actor, const std::vector<std::string>& 
                 Persistence::FormKeyUtil::BuildFormKey(npc->defaultOutfit);
         }
 
-        // Nothing to do when the item set is unchanged AND the actor is already wearing
-        // our record. Without this the UnequipAll that SetOutfit queues re-enters
-        // through the equip sink and we dispatch two or three times per click.
-        needsDispatch = (assignment->lastApplied != sortedKeys) || (npc->defaultOutfit != outfit);
+        // Dispatch only to put our record on an actor who is not already wearing it.
+        //
+        // A change to the item set is deliberately NOT a reason to dispatch. Fill rewrites
+        // the record in place and the engine reads it fresh every time it applies an
+        // outfit, so a new item set is already live for everything that comes later - a
+        // cell load, SPID, the lock's own reapply. Re-dispatching cannot make it any more
+        // live, because the form identity has not changed and the engine has nothing to
+        // react to.
+        //
+        // What it does instead is destroy gear. An outfit change makes the engine strip
+        // the items the previous application put in the inventory, and with the same form
+        // on both sides of the change it does not add them back. Every piece that left the
+        // list between two dispatches was deleted out of the actor that way. Verified
+        // against Daegon: her Elven Sentry Cuirass and Sabatons went out of the list on
+        // the 14:27:03 dispatch and left her inventory with it, after which no click could
+        // equip them - EquipObject on an item an actor does not have is a silent no-op,
+        // so the wheel reported the equip and nothing ever happened.
+        needsDispatch = (npc->defaultOutfit != outfit);
         assignment->lastApplied = sortedKeys;
     }
 
     Fill(outfit, formKeys);
 
     if (!needsDispatch) {
-        spdlog::trace("OutfitFormBackend::Apply - '{}' unchanged, skipping dispatch", actor->GetName());
+        spdlog::trace("OutfitFormBackend::Apply - '{}' already wears '{}'; rewrote it in place "
+            "to {} item(s)", actor->GetName(), outfit->GetFormEditorID(),
+            outfit->outfitItems.size());
         return true;
     }
 
@@ -255,7 +330,7 @@ bool OutfitFormBackend::Apply(RE::Actor* actor, const std::vector<std::string>& 
         outfit->GetFormEditorID(), outfit->outfitItems.size(),
         actor->GetName(), actor->GetFormID());
 
-    DispatchSetOutfit(actor, outfit);
+    DispatchSetOutfit(actor, outfit, true);
     return true;
 }
 
@@ -338,7 +413,7 @@ void OutfitFormBackend::ReapplyAll()
 
         spdlog::info("  - Re-assigning '{}' to '{}'",
             entry.outfit->GetFormEditorID(), entry.actor->GetName());
-        DispatchSetOutfit(entry.actor, entry.outfit);
+        DispatchSetOutfit(entry.actor, entry.outfit, true);
     }
 }
 

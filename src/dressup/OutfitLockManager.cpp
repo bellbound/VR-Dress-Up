@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <iterator>
 #include <spdlog/spdlog.h>
 
 namespace
@@ -117,6 +118,20 @@ RE::BSEventNotifyControl OutfitLockManager::ProcessEvent(
         }
     }
 
+    // Destroying is for the player taking a piece off in the menu. When something else
+    // undresses a locked NPC - a scene, a bath mod, an outfit manager - the lock is about
+    // to put that outfit straight back on, and deleting the items out from under it means
+    // the reapply has to re-create them. That only works for pieces the locked outfit
+    // knows about; anything else was gone for good, and the NPC came back dressed in the
+    // stored set rather than in what she had on. So leave it in the inventory and leave
+    // it marked: the next unequip the player actually asks for still cleans it up.
+    if (m_userEditCount.load(std::memory_order_relaxed) == 0 && IsLocked(actor)) {
+        spdlog::info("OutfitLockManager::ProcessEvent - Keeping gallery-spawned item '{}' "
+            "(0x{:08X}) on '{}': something else undressed them and the lock is about to put "
+            "it back", baseObjectName, a_event->baseObject, actorName);
+        return RE::BSEventNotifyControl::kContinue;
+    }
+
     // Capture IDs for deferred task (pointers may become invalid)
     RE::FormID itemID = a_event->baseObject;
     std::string itemName = baseObjectName;
@@ -131,6 +146,19 @@ RE::BSEventNotifyControl OutfitLockManager::ProcessEvent(
         auto* form = RE::TESForm::LookupByID(itemID);
 
         if (targetActor && form) {
+            // The frame this waits out is long enough for the piece to have gone back on -
+            // anything that clears a slot before filling it with the same item unequips
+            // and re-equips inside one frame - and removing it then would delete gear the
+            // actor is wearing. Put the mark back and leave it alone.
+            auto* armor = form->As<RE::TESObjectARMO>();
+            if (armor && ItemEquipHelper::IsArmorEquippedOrPending(targetActor, armor)) {
+                GetSingleton()->MarkItemAsGallerySpawned(targetActor, itemID);
+                spdlog::info("OutfitLockManager - Gallery-spawned item '{}' (0x{:08X}) went back "
+                    "on '{}' before the removal ran; keeping it",
+                    itemName, itemID, targetActor->GetName());
+                return;
+            }
+
             auto* boundObj = form->As<RE::TESBoundObject>();
             if (boundObj) {
                 targetActor->RemoveItem(boundObj, 1,
@@ -222,6 +250,36 @@ bool OutfitLockManager::IsInEquipBackoff(RE::FormID actorID) const
     std::lock_guard<std::mutex> lock(m_equipRateMutex);
     const auto it = m_equipRate.find(actorID);
     return it != m_equipRate.end() && NowMs() < it->second.backoffUntilMs;
+}
+
+bool OutfitLockManager::ClearEquipBackoff(RE::FormID actorID)
+{
+    const std::int64_t now = NowMs();
+    bool cleared = false;
+
+    {
+        std::lock_guard<std::mutex> lock(m_equipRateMutex);
+        const auto it = m_equipRate.find(actorID);
+        if (it != m_equipRate.end() && now < it->second.backoffUntilMs) {
+            cleared = true;
+        }
+        // Erased rather than zeroed: leaving the window and count behind would have the
+        // breaker judge the next second against events from before the stand-down.
+        m_equipRate.erase(actorID);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(m_reapplyMutex);
+        const auto it = m_reapply.find(actorID);
+        if (it != m_reapply.end() && now < it->second.backoffUntilMs) {
+            cleared = true;
+            it->second.backoffUntilMs = 0;
+            it->second.burst = 0.0;
+            it->second.reported = false;
+        }
+    }
+
+    return cleared;
 }
 
 void OutfitLockManager::BeginUserEdit()
@@ -522,6 +580,30 @@ std::vector<RE::TESObjectARMO*> OutfitLockManager::GetEquippedArmor(RE::Actor* a
             });
         if (duplicate != result.end()) continue;
 
+        // One item per biped slot, the same rule the actor lives under. A queued equip
+        // displaces whatever the engine still shows in the slots it covers, because that
+        // is exactly what the engine will do the moment it applies the equip - so the
+        // piece being displaced leaves the snapshot with it.
+        //
+        // Without this the snapshot could describe a body no actor can have. Daegon's
+        // went out holding her Daegon Cuirass and an Elven Sentry Cuirass, both slot 32,
+        // and Royal Boots and Sabatons, both slot 37: a queued equip that never landed
+        // was being counted alongside the piece it had failed to replace. That set then
+        // went into the locked outfit, and an outfit is not a list the engine can wear.
+        const auto slots = static_cast<std::uint32_t>(armor->GetSlotMask());
+        if (slots != 0) {
+            result.erase(std::remove_if(result.begin(), result.end(),
+                [armor, slots](RE::TESObjectARMO* worn) {
+                    if ((static_cast<std::uint32_t>(worn->GetSlotMask()) & slots) == 0) {
+                        return false;
+                    }
+                    spdlog::debug("OutfitLockManager::GetEquippedArmor - dropping '{}' "
+                        "(0x{:08X}): '{}' is going on over it",
+                        worn->GetFullName(), worn->GetFormID(), armor->GetFullName());
+                    return true;
+                }), result.end());
+        }
+
         spdlog::debug("OutfitLockManager::GetEquippedArmor - counting '{}' (0x{:08X}): equipped "
             "this frame, engine has not applied it yet",
             armor->GetFullName(), armor->GetFormID());
@@ -676,6 +758,210 @@ bool OutfitLockManager::SaveOutfit(RE::Actor* actor, const std::string& outfitNa
 
     spdlog::info("OutfitLockManager::SaveOutfit - Saved {} of {} worn items for outfit '{}'",
         stored, equipped.size(), outfitName);
+
+    return true;
+}
+
+// =============================================================================
+// Menu-edit reconciliation
+// =============================================================================
+
+std::vector<RE::FormID> OutfitLockManager::SnapshotWornArmor(RE::Actor* actor) const
+{
+    std::vector<RE::FormID> ids;
+    if (!actor) return ids;
+
+    for (auto* armor : GetEquippedArmor(actor)) {
+        if (armor) ids.push_back(armor->GetFormID());
+    }
+
+    // Sorted so the two snapshots either side of an edit can be differenced directly.
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    return ids;
+}
+
+void OutfitLockManager::ReconcileBeforeUserEdit(RE::Actor* actor)
+{
+    if (!actor || actor->IsPlayerRef()) {
+        return;
+    }
+
+    if (!Settings::GetSingleton()->IsReapplyOnExternalChangeEnabled()) {
+        return;  // the player has asked us not to fight over gear at all
+    }
+
+    if (!IsLocked(actor)) {
+        return;
+    }
+
+    // Already wearing the locked set: nothing to correct, and the reapply would be pure
+    // equip traffic. This is the overwhelmingly common case.
+    if (!DiffersFromLockedOutfit(actor)) {
+        return;
+    }
+
+    const RE::FormID actorID = actor->GetFormID();
+
+    {
+        const std::int64_t now = NowMs();
+        std::lock_guard<std::mutex> lock(m_lastApplyMutex);
+        const auto it = m_lastApplyMs.find(actorID);
+        if (it != m_lastApplyMs.end() && now - it->second < kUserEditReconcileDebounceMs) {
+            spdlog::trace("OutfitLockManager::ReconcileBeforeUserEdit - '{}' was reapplied "
+                "{}ms ago, letting it land", actor->GetName(), now - it->second);
+            return;
+        }
+    }
+
+    // The breaker exists so we do not trade equips with whatever is cycling this actor.
+    // The player opening the wheel on them is the one signal that outranks it: they are
+    // about to edit this outfit, and editing it from a state some other mod chose is how
+    // the wrong gear ends up in the lock for good.
+    const bool clearedBackoff = ClearEquipBackoff(actorID);
+
+    spdlog::info("OutfitLockManager::ReconcileBeforeUserEdit - '{}' (0x{:08X}) is not wearing "
+        "their locked outfit{}; putting it back before the edit",
+        actor->GetName(), actorID,
+        clearedBackoff ? ", and was in a stand-down the player opening the wheel overrides"
+                       : "");
+
+    // Same bracket every other reapply path uses - the unequip half would otherwise trip
+    // SeverActions' alias debounce and have it re-dress the NPC on top of us.
+    SeverActionsCompat::SuspendLock(actor);
+    ApplyOutfit(actor, "locked", true);
+    SeverActionsCompat::ResumeLockAfterMs(actor, SeverActionsCompat::kEquipSettleMs);
+}
+
+bool OutfitLockManager::UpdateLockedOutfitFromEdit(RE::Actor* actor,
+    const std::vector<RE::FormID>& wornBefore)
+{
+    if (!actor) {
+        return false;
+    }
+
+    const std::vector<RE::FormID> wornAfter = SnapshotWornArmor(actor);
+
+    // Only what this edit changed. A piece worn on both sides is left exactly as the
+    // stored outfit already has it, which is the whole point: gear another mod put on
+    // while we were backed off is in both snapshots, so it can never be laundered into
+    // the lock by the player clicking something unrelated.
+    std::vector<RE::FormID> added;
+    std::vector<RE::FormID> removed;
+    std::set_difference(wornAfter.begin(), wornAfter.end(),
+        wornBefore.begin(), wornBefore.end(), std::back_inserter(added));
+    std::set_difference(wornBefore.begin(), wornBefore.end(),
+        wornAfter.begin(), wornAfter.end(), std::back_inserter(removed));
+
+    // Resolved outside the lock: BuildFormKey walks the data handler, and m_mutex is the
+    // one ApplyOutfit holds on the game thread.
+    struct Change
+    {
+        std::string formKey;
+        std::string name;
+    };
+
+    const auto describe = [](RE::FormID id) -> Change {
+        Change change;
+        auto* form = RE::TESForm::LookupByID(id);
+        if (!form) return change;
+        change.formKey = Persistence::FormKeyUtil::BuildFormKey(form);
+        const char* name = form->GetName();
+        change.name = (name && name[0]) ? name : fmt::format("FormID:{:08X}", id);
+        return change;
+    };
+
+    std::vector<Change> toAdd;
+    std::vector<Change> toRemove;
+    for (const RE::FormID id : added) {
+        auto change = describe(id);
+        if (!change.formKey.empty()) toAdd.push_back(std::move(change));
+    }
+    for (const RE::FormID id : removed) {
+        auto change = describe(id);
+        if (!change.formKey.empty()) toRemove.push_back(std::move(change));
+    }
+
+    std::size_t stored = 0;
+    std::vector<std::string> leftOut;
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        auto it = m_outfits.find(OutfitKey{actor->GetFormID(), "locked"});
+        if (it == m_outfits.end()) {
+            // Unlocked from inside the edit. Nothing to fold into, and re-creating the
+            // outfit here would undo the unlock the player just asked for.
+            spdlog::info("OutfitLockManager::UpdateLockedOutfitFromEdit - '{}' is no longer "
+                "locked; leaving it that way", actor->GetName());
+            return false;
+        }
+
+        auto& items = it->second.items;
+        if (it->second.actorFormKey.empty()) {
+            it->second.actorFormKey = Persistence::FormKeyUtil::BuildFormKey(actor);
+        }
+
+        for (const auto& change : toRemove) {
+            const auto before = items.size();
+            items.erase(std::remove_if(items.begin(), items.end(),
+                [&change](const SavedArmorItem& item) {
+                    return item.formKey == change.formKey;
+                }), items.end());
+            if (items.size() != before) {
+                spdlog::info("  - Took '{}' ({}) out of the locked outfit",
+                    change.name, change.formKey);
+            }
+        }
+
+        for (const auto& change : toAdd) {
+            const bool present = std::any_of(items.begin(), items.end(),
+                [&change](const SavedArmorItem& item) {
+                    return item.formKey == change.formKey;
+                });
+            if (present) continue;
+
+            SavedArmorItem item;
+            item.formKey = change.formKey;
+            items.push_back(std::move(item));
+            spdlog::info("  - Put '{}' ({}) into the locked outfit",
+                change.name, change.formKey);
+        }
+
+        stored = items.size();
+        RefreshLockedCount();
+
+        // Anything worn that this edit did not touch and the outfit does not hold is
+        // exactly what the old snapshot used to absorb. Named rather than silently
+        // dropped: it means something outside the wheel is dressing this actor, and that
+        // is the thing to go and fix.
+        for (const RE::FormID id : wornAfter) {
+            if (!std::binary_search(wornBefore.begin(), wornBefore.end(), id)) {
+                continue;  // this edit put it on; already handled above
+            }
+            auto* armor = RE::TESForm::LookupByID<RE::TESObjectARMO>(id);
+            if (!armor) continue;
+
+            const std::string formKey = Persistence::FormKeyUtil::BuildFormKey(armor);
+            const bool inOutfit = std::any_of(items.begin(), items.end(),
+                [&formKey](const SavedArmorItem& item) { return item.formKey == formKey; });
+            if (inOutfit) continue;
+
+            leftOut.push_back(fmt::format("'{}' ({})", armor->GetFullName(), formKey));
+        }
+    }
+
+    for (const auto& piece : leftOut) {
+        spdlog::warn("OutfitLockManager::UpdateLockedOutfitFromEdit - '{}' is wearing {}, which "
+            "this edit did not put there and the locked outfit does not hold. Left out of the "
+            "lock; the next reapply takes it off.", actor->GetName(), piece);
+    }
+
+    spdlog::info("OutfitLockManager::UpdateLockedOutfitFromEdit - '{}' (0x{:08X}): +{} / -{}, "
+        "outfit now holds {} item(s){}",
+        actor->GetName(), actor->GetFormID(), toAdd.size(), toRemove.size(), stored,
+        leftOut.empty() ? std::string{}
+                        : fmt::format(", {} worn item(s) left out", leftOut.size()));
 
     return true;
 }
@@ -1141,6 +1427,41 @@ void OutfitLockManager::UnmarkGalleryItem(RE::Actor* actor, RE::FormID itemID)
         }
     }
     m_hasGalleryItems.store(!m_gallerySpawnedItems.empty(), std::memory_order_relaxed);
+}
+
+void OutfitLockManager::ReleaseGalleryItems(RE::Actor* actor)
+{
+    std::size_t released = 0;
+
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+
+        if (!actor) {
+            for (const auto& [actorID, items] : m_gallerySpawnedItems) {
+                released += items.size();
+            }
+            m_gallerySpawnedItems.clear();
+        } else {
+            const auto it = m_gallerySpawnedItems.find(actor->GetFormID());
+            if (it != m_gallerySpawnedItems.end()) {
+                released = it->second.size();
+                m_gallerySpawnedItems.erase(it);
+            }
+        }
+
+        m_hasGalleryItems.store(!m_gallerySpawnedItems.empty(), std::memory_order_relaxed);
+    }
+
+    if (released == 0) {
+        return;
+    }
+
+    // Destructions already queued this frame are not called off: those pieces were taken
+    // off inside the session, which is exactly the case the mark is for. This only stops
+    // *future* unequips from being read as try-on churn.
+    spdlog::info("OutfitLockManager::ReleaseGalleryItems - {} gallery item(s) on '{}' are theirs "
+        "to keep now; nothing will be destroyed if they come off later",
+        released, actor ? actor->GetName() : "every actor");
 }
 
 bool OutfitLockManager::HasDefaultOutfit(RE::Actor* actor) const

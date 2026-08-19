@@ -117,8 +117,16 @@ private:
 
     RE::BGSOutfit* OutfitForIndex(std::size_t index) const;
 
-    // Dispatch through Papyrus with the re-entrancy flag raised.
-    void DispatchSetOutfit(RE::Actor* actor, RE::BGSOutfit* outfit);
+    // Dispatch through Papyrus with the re-entrancy flag raised. With `guardInventory`
+    // the outfit's items are checked back into the actor once the change has settled -
+    // see the note on VerifyInventoryAfterDispatch. Pass false when dispatching an
+    // outfit that is not ours to keep whole, i.e. the original one Restore hands back.
+    void DispatchSetOutfit(RE::Actor* actor, RE::BGSOutfit* outfit, bool guardInventory = false);
+
+    // Re-add anything the engine's outfit change removed from the actor's inventory.
+    // Runs on the main thread a settle window after a dispatch.
+    static void VerifyInventoryAfterDispatch(RE::FormID actorID,
+        const std::vector<RE::FormID>& itemIDs);
 
     std::vector<RE::BGSOutfit*> m_pool;
     RE::BGSOutfit*              m_blankOutfit = nullptr;
