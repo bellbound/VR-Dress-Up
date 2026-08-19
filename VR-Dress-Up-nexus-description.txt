@@ -1,0 +1,105 @@
+[center][img]https://raw.githubusercontent.com/bellbound/VR-Dress-Up/refs/heads/master/assets/demo/demo-inventory.webp[/img][/center]
+[center][/center]
+[center][color=#ffd966][b][size=5]INTRODUCTION[/size][/b][/color][/center]
+[quote][b]Grab an NPC with your hand, pull the trigger, and a wheel of everything they are wearing appears around them. Take pieces off, hand them something out of your own pack, or dress them head to toe out of every armour mod you have installed - without ever opening a menu.
+
+Whatever you put on them stays on them.[/b][/quote]
+
+
+[center][color=#ffd966][size=5][b]KEY FEATURES[/b][/size][/color][/center]
+
+[color=#ffe599][size=4][b]◈ Open It With Your Hands[/b][/size][/color]
+[size=4]Grab any NPC and press the trigger. The wheel appears showing everything they have on - press the trigger on a piece to take it off. Let go of the trigger and the menu anchors in place, so you can browse with both hands free.[/size]
+
+[color=#ffe599][size=4][b]◈ Give Them Your Gear[/b][/size][/color]
+[size=4]Toggle to your own inventory and the wheel fills with your armour and weapons. Press one and they put it on. A button appears to take everything back when you are done.[/size]
+
+[color=#ffe599][size=4][b]◈ Browse Every Armour Mod You Own[/b][/size][/color]
+[size=4]The Gallery lists every mod in your load order that adds armour. Pick one and its whole wardrobe fills the wheel - no crafting, no console, no additem. Try things on, take them straight back off.[/size]
+[spoiler][center][size=4][img]https://raw.githubusercontent.com/bellbound/VR-Dress-Up/refs/heads/master/assets/demo/demo-gallery.webp[/img][/size][/center][/spoiler]
+
+[color=#ffe599][size=4][b]◈ Or Browse By What It Is[/b][/size][/color]
+[size=4]Categories pools every mod at once and sorts by kind instead: boots, wigs, capes, gloves, masks, crowns. One row holding every pair of boots in your install, wherever they came from.[/size]
+[spoiler][center][size=4][img]https://raw.githubusercontent.com/bellbound/VR-Dress-Up/refs/heads/master/assets/demo/demo-cat.webp[/img][/size][/center]
+[size=4]The categories are plain JSON files in [i]Data\SKSE\Plugins\VRDressup\Categories[/i]. Retune the ones that ship with the mod, or drop in your own.[/size][/spoiler]
+
+[color=#ffe599][size=4][b]◈ Lock The Look In[/b][/size][/color]
+[size=4]Press the lock and that outfit is theirs. It survives location changes, saves and reloads - and it survives other mods: if something strips a locked NPC where they stand, they are dressed again a moment later. Unlock and their original outfit comes back.[/size]
+
+[color=#ffe599][size=4][b]◈ Undress And Re-dress[/b][/size][/color]
+[size=4]One button cycles armour off, everything off, and dressed again. It follows the inventory toggle, so it works on you as well - your own gear off and back on without a trip through the pause menu.[/size]
+
+[color=#ffe599][size=4][b]◈ It Plays Fair With Other Mods[/b][/size][/color]
+[size=4]Locking hands the outfit over to SPID properly, so SPID stops re-dressing that NPC instead of fighting you over them. SeverActions is told to leave locked NPCs alone for as long as the lock holds. And if some other mod turns out to be re-dressing an NPC as fast as this one does, DressUp notices the tug-of-war, stands down on its own and writes the reason to the log, rather than trading equips with it forever.[/size]
+
+
+[center][color=#ffd966][size=5][b]REQUIREMENTS[/b][/size][/color][/center]
+
+[left][size=4][url=https://www.nexusmods.com/skyrimspecialedition/mods/169497]◈ 3DUI[/url][/size][/left]
+[left][size=4][url=https://www.nexusmods.com/skyrimspecialedition/mods/43930]◈ HIGGS[/url] - this is how you grab the NPC.[/size][/left]
+[left][size=4][url=https://www.nexusmods.com/skyrimspecialedition/mods/27782]◈ Skyrim VR Tools[/url][/size][/left]
+[left][size=4][url=https://www.nexusmods.com/skyrimspecialedition/mods/58101]◈ Address Library for Skyrim VR[/url][/size][/left]
+[left][size=4][url=https://www.nexusmods.com/skyrimspecialedition/mods/106712]◈ Skyrim VR ESL Support[/url][/size][/left]
+[left][/left]
+[left][size=4][url=https://www.nexusmods.com/skyrimspecialedition/mods/59818]◈ A crashlogger[/url] - not required, but you should have one anyway.[/size][/left]
+
+[color=#ffe599][size=4][b]Safety & Compatibility[/b][/size][/color]
+[size=4]This is an SKSE mod, so it can be installed or uninstalled at any point in a playthrough. It works with any armour or weapon mod - the more you have, the more there is to browse. There are no known incompatibilities; SPID and SeverActions are handled explicitly, see above.[/size]
+
+[color=#ffe599][size=4][b]Limitations[/b][/size][/color]
+[size=4]◈ Humanoid NPCs only. Children, creatures and the dead are left alone.
+◈ The armour scan runs the first time you open the Gallery or Categories, in the background. A loading indicator shows while it works, and it is only slow once.[/size]
+
+
+[center][color=#ffd966][size=5][b]TECHNICAL INFORMATION[/b][/size][/color][/center]
+
+[color=#ffe599][size=4][b]Settings (INI)[/b][/size][/color]
+[spoiler][size=4]Everything lives in [i]Data\SKSE\Plugins\DressUpVR.ini[/i], and every setting is commented in the file itself.
+
+[b]bEnableModGallery[/b] - the row with one entry per installed mod.
+[b]bEnableCategoryGallery[/b] - the row with one entry per item category. Both rows share the same armour scan, and neither runs until you press its button.
+
+[b]bUseOutfitBackend[/b] - assign a real Outfit form when an NPC is locked. This is what makes SPID stand down. Turn it off for plain equip-only locking.
+[b]bOutfitBackendUniqueOnly[/b] - skip NPCs whose base record is shared between copies, so dressing one generic bandit doesn't dress every bandit.
+[b]bSeverActionsCompat[/b] - take locked NPCs out of SeverActions' outfit system while the lock holds.
+
+[b]bReapplyOnExternalChange[/b] - put a locked outfit back whenever something else changes it, rather than only on a location change or a load.
+[b]iReapplyDelayMs[/b] - how long to wait first, so one outfit swap collapses into one reapply instead of a dozen.
+[b]iReapplyBurstAllowance[/b] and [b]iReapplySustainedIntervalSec[/b] - how many reapplies may happen back-to-back, and the sustained rate that matters after that.
+[b]iReapplyBackoffSec[/b] - how long to stand down once a tug-of-war is detected.[/size][/spoiler]
+
+[color=#ffe599][size=4][b]For Mod Authors[/b][/size][/color]
+[spoiler][size=4]DressUpVR.dll exports an SKSE plugin interface for reading and writing outfits on an actor: enumerate the outfits stored for an actor, read their contents, and inject an outfit back. It all speaks FormKeys rather than runtime form IDs, so an outfit can be read out of one savegame and written into another. The header is [i]src/api/DressUpInterface002.h[/i] in the repo and is meant to be copied into your project.[/size][/spoiler]
+
+
+[center][color=#ffd966][size=5][b]F.A.Q[/b][/size][/color][/center]
+
+[color=#ffe599][size=4][b]The NPC I dressed went back to their old outfit.[/b][/size][/color]
+[size=4]Lock them. Without the lock, the game and other mods are free to re-dress them at the next opportunity.[/size]
+
+[color=#ffe599][size=4][b]I locked them and they still changed back.[/b][/size][/color]
+[size=4]Check the log for OUTFIT TUG-OF-WAR - it names the NPC. That means another mod is re-dressing them as fast as DressUp is, and DressUp has stood down rather than fight it. Otherwise, make sure bUseOutfitBackend is on.[/size]
+
+[color=#ffe599][size=4][b]I dressed one bandit and nothing stuck.[/b][/size][/color]
+[size=4]Outfits are stored on the base NPC record, and generic NPCs share theirs between copies. By default those are skipped, so you don't dress a whole camp at once. Set bOutfitBackendUniqueOnly=0 if that is what you actually want.[/size]
+
+[color=#ffe599][size=4][b]The Gallery is empty, or still loading.[/b][/size][/color]
+[size=4]The first open scans every armour record in your load order in the background. Give it a moment; after that it is instant.[/size]
+
+[color=#ffe599][size=4][b]Can I uninstall mid-playthrough?[/b][/size][/color]
+[size=4]Yes. It's an SKSE mod. NPCs keep whatever they happen to be wearing.[/size]
+
+[color=#ffe599][size=4][b]Can I use it on myself?[/b][/size][/color]
+[size=4]The undress and re-dress button follows the inventory toggle, so yes for getting your own gear off and back on. The wheel itself is aimed at NPCs.[/size]
+
+
+[center][color=#ffd966][size=5][b]ACKNOWLEDGEMENTS AND CREDITS[/b][/size][/color][/center]
+
+[size=4]◈ [url=https://www.nexusmods.com/profile/Shizof?gameId=1704]Shizof[/url] - for showing what the engine can be made to do in Spell Wheel.[/size]
+[size=4]◈ ahkmos - for HIGGS, without which this whole interaction doesn't exist.[/size]
+[size=4]◈ Everyone who helped test and break this.[/size]
+[size=4]◈ Icons by Icons8.[/size]
+
+
+[center][color=#ffd966][size=5][b]SOURCE CODE[/b][/size][/color][/center]
+[center][size=4][url=https://github.com/bellbound/VR-Dress-Up]Github[/url][/size][/center]
