@@ -1127,6 +1127,43 @@ bool OutfitLockManager::HasOutfit(RE::Actor* actor, const std::string& outfitNam
     return m_outfits.find(key) != m_outfits.end();
 }
 
+bool OutfitLockManager::CopyOutfit(RE::Actor* actor, const std::string& from, const std::string& to)
+{
+    if (!actor || from == to) return false;
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const auto source = m_outfits.find(OutfitKey{actor->GetFormID(), from});
+    if (source == m_outfits.end()) {
+        return false;
+    }
+    m_outfits[OutfitKey{actor->GetFormID(), to}] = source->second;
+    RefreshLockedCount();
+
+    spdlog::debug("OutfitLockManager::CopyOutfit - '{}' -> '{}' for '{}' ({} item(s), noWeapon={})",
+        from, to, actor->GetName(), source->second.items.size(), source->second.noWeapon);
+    return true;
+}
+
+bool OutfitLockManager::GetOutfitNoWeapon(RE::Actor* actor, const std::string& outfitName) const
+{
+    if (!actor) return false;
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const auto it = m_outfits.find(OutfitKey{actor->GetFormID(), outfitName});
+    return it != m_outfits.end() && it->second.noWeapon;
+}
+
+void OutfitLockManager::SetOutfitNoWeapon(RE::Actor* actor, const std::string& outfitName, bool noWeapon)
+{
+    if (!actor) return;
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const auto it = m_outfits.find(OutfitKey{actor->GetFormID(), outfitName});
+    if (it != m_outfits.end()) {
+        it->second.noWeapon = noWeapon;
+    }
+}
+
 bool OutfitLockManager::Lock(RE::Actor* actor)
 {
     if (!actor) {
@@ -1532,9 +1569,13 @@ void OutfitLockManager::OnGameSave(SKSE::SerializationInterface* a_intfc)
             a_intfc->WriteRecordData(actorFormKey.data(), actorKeyLen);
         }
 
-        spdlog::debug("  - Saved outfit '{}' for actor 0x{:08X} ('{}') with {} items",
+        // v6: empty hands or not
+        const std::uint8_t noWeapon = outfit.noWeapon ? 1 : 0;
+        a_intfc->WriteRecordData(&noWeapon, sizeof(noWeapon));
+
+        spdlog::debug("  - Saved outfit '{}' for actor 0x{:08X} ('{}') with {} items, noWeapon={}",
             key.outfitName, key.actorRefID,
-            actorFormKey.empty() ? "dynamic/unknown" : actorFormKey, itemCount);
+            actorFormKey.empty() ? "dynamic/unknown" : actorFormKey, itemCount, outfit.noWeapon);
     }
 
     // === Save Player Given Items ===
@@ -1585,8 +1626,8 @@ void OutfitLockManager::OnLoadRecord(SKSE::SerializationInterface* a_intfc,
     std::lock_guard<std::mutex> lock(mgr->m_mutex);
 
     if (type == kOutfitRecord) {
-            // v4 and v5 are both readable: v5 only appends a field per outfit, so an
-            // older co-save loads fine and simply carries no actorFormKey.
+            // v4 to v6 are all readable: each version only appends a field per outfit,
+            // so an older co-save loads fine and simply carries no actorFormKey / noWeapon.
             if (version < kMinReadableVersion || version > kSerializationVersion) {
                 spdlog::warn("OutfitLockManager::OnLoadRecord - Incompatible outfit version {} (readable range {}..{}), skipping",
                     version, kMinReadableVersion, kSerializationVersion);
@@ -1642,6 +1683,12 @@ void OutfitLockManager::OnLoadRecord(SKSE::SerializationInterface* a_intfc,
                         outfit.actorFormKey.resize(actorKeyLen);
                         a_intfc->ReadRecordData(outfit.actorFormKey.data(), actorKeyLen);
                     }
+                }
+
+                if (version >= 6) {
+                    std::uint8_t noWeapon = 0;
+                    a_intfc->ReadRecordData(&noWeapon, sizeof(noWeapon));
+                    outfit.noWeapon = noWeapon != 0;
                 }
 
                 // Prefer the FormKey over SKSE's ref-ID resolution. SKSE can only

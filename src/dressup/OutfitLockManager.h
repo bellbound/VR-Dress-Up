@@ -47,6 +47,12 @@ struct SavedOutfit
     //
     // Empty for records loaded from v4 or earlier, and for dynamic actors.
     std::string actorFormKey;
+
+    // Whether this look has the NPC empty-handed. An outfit says nothing about *which*
+    // weapon an NPC carries - that is theirs to choose - only whether they carry one, the
+    // same distinction WeaponLockManager draws. Only the saved outfit slots set it; for
+    // "locked" the live answer is WeaponLockManager::IsEnforcing. Stored from v6.
+    bool noWeapon = false;
 };
 
 // Key for outfit storage: actor ref ID + outfit name
@@ -78,7 +84,8 @@ public:
     // v4: FormKey strings for armor items
     // v5: + actorFormKey per outfit, so the *actor* identity is load-order
     //     independent too. v4 records still load; they simply have no actorFormKey.
-    static constexpr std::uint32_t kSerializationVersion = 5;
+    // v6: + noWeapon per outfit. v5 records load with it unset.
+    static constexpr std::uint32_t kSerializationVersion = 6;
     static constexpr std::uint32_t kMinReadableVersion = 4;
     static constexpr std::uint32_t kOutfitRecord = '5OLF';  // 5 + OutfitLock outFit
     static constexpr std::uint32_t kPlayerItemsRecord = '5OPI';  // 5 + OutfitLock Player Items
@@ -117,6 +124,14 @@ public:
 
     // Check if an actor has a saved outfit with the given name
     bool HasOutfit(RE::Actor* actor, const std::string& outfitName) const;
+
+    // Copy one stored outfit over another (or into a new name), items and flags alike.
+    // Map only - equips nothing. Returns false if there is no source outfit.
+    bool CopyOutfit(RE::Actor* actor, const std::string& from, const std::string& to);
+
+    // The empty-hands flag of a stored outfit; false when there is no such outfit.
+    bool GetOutfitNoWeapon(RE::Actor* actor, const std::string& outfitName) const;
+    void SetOutfitNoWeapon(RE::Actor* actor, const std::string& outfitName, bool noWeapon);
 
     // Lock an actor (creates "locked" outfit from current equipped armor).
     //
