@@ -3,8 +3,10 @@
 #include <RE/Skyrim.h>
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <Windows.h>
 #include "InventoryManager.h"
+#include "dressup/OutfitSlotManager.h"
 #include "log.h"
 #include "settings.h"
 #include "api/ThreeDUIInterface001.h"
@@ -100,6 +102,21 @@ namespace Backdrop
     inline void ApplyItem(P3DUI::Element* element, bool equipped = false)
     {
         Apply(element, kItemScale, equipped ? kItemEquipped : kItemAvailable);
+    }
+
+    // A saved outfit the player has armed for deletion: the worn plate, turned red. The
+    // only red in the menu, so it cannot be mistaken for a selection.
+    constexpr Tint kOutfitArmed = {1.00f, 0.30f, 0.25f, 1.00f, 1.90f};
+
+    // The outfit row's plates share the gallery row's size and its idle/selected pair.
+    enum class OutfitPlate : std::uint8_t { Idle, Worn, Armed };
+
+    inline void ApplyOutfitPlate(P3DUI::Element* element, OutfitPlate state)
+    {
+        Apply(element, kCategoryScale,
+            state == OutfitPlate::Armed ? kOutfitArmed
+            : state == OutfitPlate::Worn ? kCategorySelected
+                                         : kCategoryIdle);
     }
 }
 
@@ -221,6 +238,35 @@ public:
             m_galleryRow->SetVisible(false);  // Hidden by default
         }
 
+        // === Create Outfit Row (ColumnGrid of saved looks - same shape as the gallery row) ===
+        P3DUI::ColumnGridConfig outfitConfig = P3DUI::ColumnGridConfig::Default("outfit_row");
+        outfitConfig.columnSpacing = 12.0f;
+        outfitConfig.visibleWidth = 48.0f;
+        outfitConfig.numRows = 1;
+
+        m_outfitRow = m_api->CreateColumnGrid(outfitConfig);
+        if (m_outfitRow) {
+            m_outfitRow->SetOrigin(P3DUI::VerticalOrigin::Center, P3DUI::HorizontalOrigin::Center);
+            m_root->AddChild(m_outfitRow);
+            m_outfitRow->SetLocalPosition(0, 0, -20.0f);  // LayoutRows moves it
+            m_outfitRow->SetVisible(false);
+        }
+
+        // === Create Editing Text (between the wheel and the tool row) ===
+        // The one thing that says a click is about to change a saved outfit, so it sits
+        // where the eye already is rather than under the rows with the info text.
+        P3DUI::TextConfig editingConfig = P3DUI::TextConfig::Default("editing_text");
+        editingConfig.text = L"";
+        editingConfig.scale = 1.0f;
+        editingConfig.facingMode = P3DUI::FacingMode::YawOnly;
+
+        m_editingText = m_api->CreateText(editingConfig);
+        if (m_editingText) {
+            m_root->AddChild(m_editingText);
+            m_editingText->SetLocalPosition(0, 0, kEditingTextZ);
+            m_editingText->SetVisible(false);
+        }
+
         // === Create Info Text (context-dependent display below tool/gallery row) ===
         P3DUI::TextConfig infoTextConfig = P3DUI::TextConfig::Default("info_text");
         infoTextConfig.text = L"";  // Initially empty
@@ -335,6 +381,9 @@ public:
         // Populate item spiral with inventory items
         RefreshItemSpiral();
 
+        // Both rows start closed; put the info text where that leaves it
+        LayoutRows();
+
         // Initialize info text (hidden for NPC mode)
         UpdateInfoText();
 
@@ -362,8 +411,8 @@ private:
 
         // Handle hover events for info text updates
         if (event->type == P3DUI::EventType::HoverEnter) {
-            if (id == "lock_button") {
-                ShowHoverInfoText(L"When locked, the NPC's outfit can still change, but is reset to your selection on each location change");
+            if (id == "outfits_toggle") {
+                ShowHoverInfoText(L"Saved outfits for this NPC");
                 return true;
             }
             if (id == "gallery_toggle") {
@@ -377,7 +426,7 @@ private:
         }
 
         if (event->type == P3DUI::EventType::HoverExit) {
-            if (id == "lock_button" || id == "gallery_toggle" || id == "keyword_toggle") {
+            if (id == "outfits_toggle" || id == "gallery_toggle" || id == "keyword_toggle") {
                 ClearHoverInfoText();
                 return true;
             }
@@ -398,22 +447,36 @@ private:
                 return true;
             }
 
-            // Lock button
-            if (id == "lock_button") {
-                OnToggleLock();
-                return true;
-            }
-
-            // Return items button
-            if (id == "return_button") {
-                OnReturnPlayerItems();
-                return true;
-            }
-
             // Undress/Redress button
             if (id == "undress_button") {
                 OnUndressButtonClicked();
                 return true;
+            }
+
+            // Outfit row toggle and its buttons
+            if (id == "outfits_toggle") {
+                SetOutfitRowVisible(!m_outfitRowVisible);
+                return true;
+            }
+            if (id == "outfit_default") {
+                OnOutfitDefaultClicked();
+                return true;
+            }
+            if (id == "outfit_save") {
+                OnOutfitSaveClicked();
+                return true;
+            }
+            if (id == "outfit_delete") {
+                OnOutfitDeleteClicked();
+                return true;
+            }
+            if (id.rfind("outfit_", 0) == 0) {
+                try {
+                    OnOutfitSelected(std::stoi(id.substr(7)));
+                    return true;
+                } catch (...) {
+                    spdlog::warn("DressupMenuManager: Invalid outfit ID: {}", id);
+                }
             }
 
             // Gallery toggle button
@@ -500,26 +563,6 @@ private:
             m_handleRow->AddChild(inventoryToggle);
         }
 
-        // Lock toggle button - allows manual lock/unlock
-        bool isLocked = invMgr->IsNpcLocked();
-        const wchar_t* lockTooltip = isLocked
-            ? L"Unlock (drops this outfit)"
-            : L"Lock this outfit";
-        std::string lockIcon = isLocked
-            ? "textures\\VRDressup\\lock_highlight.dds"
-            : "textures\\VRDressup\\unlock.dds";
-
-        P3DUI::ElementConfig lockConfig = P3DUI::ElementConfig::Default("lock_button");
-        lockConfig.texturePath = lockIcon.c_str();
-        lockConfig.tooltip = lockTooltip;
-        lockConfig.scale = 1.2f;
-        lockConfig.facingMode = P3DUI::FacingMode::None;
-
-        auto* lockButton = m_api->CreateElement(lockConfig);
-        if (lockButton) {
-            m_handleRow->AddChild(lockButton);
-        }
-
         // Undress/Redress button - cycles through undress states. Follows the inventory
         // toggle: in player mode it is the player who gets undressed, which is the whole
         // reason it follows - getting your own gear off and back on is otherwise a trip
@@ -557,17 +600,19 @@ private:
             m_handleRow->AddChild(undressButton);
         }
 
-        // "Return Items" button (only shown if NPC has player items)
-        if (invMgr->HasPlayerItems()) {
-            P3DUI::ElementConfig returnConfig = P3DUI::ElementConfig::Default("return_button");
-            returnConfig.texturePath = "textures\\VRDressup\\rewind.dds";
-            returnConfig.tooltip = L"Take back your items";
-            returnConfig.scale = 1.2f;
-            returnConfig.facingMode = P3DUI::FacingMode::None;
+        // Outfits toggle - opens the row of saved looks below this one
+        {
+            P3DUI::ElementConfig outfitsConfig = P3DUI::ElementConfig::Default("outfits_toggle");
+            outfitsConfig.texturePath = m_outfitRowVisible
+                ? "textures\\VRDressup\\outfits_highlight.dds"
+                : "textures\\VRDressup\\outfits.dds";
+            outfitsConfig.tooltip = m_outfitRowVisible ? L"Close Outfits" : L"Outfits";
+            outfitsConfig.scale = 1.2f;
+            outfitsConfig.facingMode = P3DUI::FacingMode::None;
 
-            auto* returnButton = m_api->CreateElement(returnConfig);
-            if (returnButton) {
-                m_handleRow->AddChild(returnButton);
+            auto* outfitsButton = m_api->CreateElement(outfitsConfig);
+            if (outfitsButton) {
+                m_handleRow->AddChild(outfitsButton);
             }
         }
 
@@ -605,8 +650,8 @@ private:
             }
         }
 
-        spdlog::debug("PopulateHandleRow: isLocked={}, hasPlayerItems={}, galleryMode={}",
-            isLocked, invMgr->HasPlayerItems(), static_cast<int>(m_galleryMode));
+        spdlog::debug("PopulateHandleRow: outfitRow={}, galleryMode={}",
+            m_outfitRowVisible, static_cast<int>(m_galleryMode));
     }
 
     // Refresh item spiral based on current inventory source, filter mode, or active mod category
@@ -864,47 +909,380 @@ private:
         UpdateInfoText();
     }
 
-    // Callback: Toggle NPC lock state
-    void OnToggleLock()
-    {
-        auto* invMgr = InventoryManager::GetSingleton();
-        RE::Actor* targetActor = invMgr->GetTargetActor();
-        std::string npcName = targetActor ? targetActor->GetName() : "NPC";
+    // === Outfit row ===
+    //
+    // The row of an NPC's saved looks: NPC Default first, then one plate per saved outfit,
+    // then Save; Delete on the far left whenever a saved outfit is the one on the NPC.
+    // The plate that is lit is the look they have on, read off the lock each time rather
+    // than remembered - see OutfitSlotManager. While the row is open and a saved outfit
+    // is the one on the NPC, every edit made in the wheel is written into that outfit
+    // (AfterGearEdit); close the row and the look stays but the edits stop.
 
-        if (invMgr->IsNpcLocked()) {
-            spdlog::info("DressupMenuManager::OnToggleLock - Unlocking '{}'", npcName);
-            invMgr->UnlockNpc();
+    void SetOutfitRowVisible(bool visible)
+    {
+        m_outfitRowVisible = visible;
+        m_outfitDeleteArmed = false;
+
+        if (visible) {
+            m_editingSlot = OutfitSlotManager::GetSingleton()->Worn(GetCurrentTargetActor());
+            if (m_outfitRow) {
+                m_outfitRow->SetVisible(true);
+            }
+            RefreshOutfitRow();
         } else {
-            spdlog::info("DressupMenuManager::OnToggleLock - Locking '{}'", npcName);
-            invMgr->LockNpc();
+            m_editingSlot.reset();
+            ForgetOutfitRowElements();
+            if (m_outfitRow) {
+                m_outfitRow->Clear();
+                m_outfitRow->SetVisible(false);
+            }
         }
 
-        // Both directions can move gear: a re-lock puts the parked outfit back on, and an
-        // unlock hands the NPC to their original one.
-        RefreshItemSpiral();
-        PopulateHandleRow();
+        spdlog::info("DressupMenuManager::SetOutfitRowVisible - {}{}", visible ? "open" : "closed",
+            (visible && m_editingSlot) ? fmt::format(", editing outfit {}", *m_editingSlot) : "");
+
+        LayoutRows();
+        UpdateEditingText();
+        UpdateInfoText();
+        PopulateHandleRow();  // the toggle's icon
     }
 
-    // Callback: Return all player items back to player
-    void OnReturnPlayerItems()
+    // The row's live elements are destroyed by Clear(); drop every pointer into it first.
+    void ForgetOutfitRowElements()
     {
-        auto* invMgr = InventoryManager::GetSingleton();
+        m_outfitSlotList.clear();
+        m_outfitElements.clear();
+        m_outfitDefaultElement = nullptr;
+        m_outfitDeleteButton = nullptr;
+    }
 
-        if (!invMgr->HasPlayerItems()) {
-            spdlog::info("DressupMenuManager::OnReturnPlayerItems - No player items to return");
+    // Rebuild the outfit row from the store. Resets the scroll position, so the in-place
+    // RefreshOutfitHighlight is preferred wherever only the tint changes.
+    void RefreshOutfitRow()
+    {
+        if (!IsMenuOpen() || !m_outfitRow || !m_api || !m_outfitRowVisible) return;
+
+        m_outfitRow->Clear();
+        ForgetOutfitRowElements();
+
+        auto* slots = OutfitSlotManager::GetSingleton();
+        RE::Actor* npc = GetCurrentTargetActor();
+        m_outfitSlotList = slots->List(npc);
+
+        const std::optional<std::uint32_t> worn = HighlightedOutfit();
+
+        // Delete - only a saved outfit that is on the NPC can be deleted from here, so the
+        // button is only there when one is.
+        if (worn) {
+            P3DUI::ElementConfig deleteConfig = P3DUI::ElementConfig::Default("outfit_delete");
+            deleteConfig.texturePath = m_outfitDeleteArmed
+                ? "textures\\VRDressup\\question.dds"
+                : "textures\\VRDressup\\minus.dds";
+            const std::wstring deleteTooltip = DeleteTooltip(*worn);
+            deleteConfig.tooltip = deleteTooltip.c_str();
+            deleteConfig.scale = 1.2f;
+            deleteConfig.facingMode = P3DUI::FacingMode::None;
+
+            m_outfitDeleteButton = m_api->CreateElement(deleteConfig);
+            if (m_outfitDeleteButton) {
+                Backdrop::ApplyOutfitPlate(m_outfitDeleteButton, Backdrop::OutfitPlate::Idle);
+                m_outfitRow->AddChild(m_outfitDeleteButton);
+            }
+        }
+
+        // NPC Default - the game's own outfit, i.e. unlocked
+        {
+            P3DUI::ElementConfig defaultConfig = P3DUI::ElementConfig::Default("outfit_default");
+            defaultConfig.texturePath = "textures\\VRDressup\\npc.dds";
+            defaultConfig.tooltip = L"NPC Default";
+            defaultConfig.scale = 1.2f;
+            defaultConfig.facingMode = P3DUI::FacingMode::None;
+
+            m_outfitDefaultElement = m_api->CreateElement(defaultConfig);
+            if (m_outfitDefaultElement) {
+                SetOutfitLabel(m_outfitDefaultElement, L"Default");
+                Backdrop::ApplyOutfitPlate(m_outfitDefaultElement,
+                    slots->IsDefault(npc) ? Backdrop::OutfitPlate::Worn : Backdrop::OutfitPlate::Idle);
+                m_outfitRow->AddChild(m_outfitDefaultElement);
+            }
+        }
+
+        // One plate per saved outfit, numbered by position
+        for (size_t i = 0; i < m_outfitSlotList.size(); ++i) {
+            const auto& slot = m_outfitSlotList[i];
+            const std::string elementId = "outfit_" + std::to_string(i);
+            const std::wstring number = std::to_wstring(i + 1);
+            const std::wstring tooltip = L"Outfit " + number;
+
+            P3DUI::ElementConfig plateConfig = P3DUI::ElementConfig::Default(elementId.c_str());
+            plateConfig.tooltip = tooltip.c_str();
+            plateConfig.facingMode = P3DUI::FacingMode::None;
+
+            // Shown as one of its own pieces, the way a category is. An empty outfit - an
+            // undressed NPC, saved - has no piece to show and gets the undressed figure.
+            std::string modelPath;
+            if (auto* armor = slots->Representative(npc, slot.id)) {
+                plateConfig.scale = 1.0f;
+                plateConfig.formID = armor->GetFormID();
+                modelPath = ItemEquipHelper::GetModelPath(armor);
+                plateConfig.modelPath = modelPath.c_str();
+            } else {
+                plateConfig.scale = 1.2f;
+                plateConfig.texturePath = "textures\\VRDressup\\undress-full.dds";
+            }
+
+            auto* plate = m_api->CreateElement(plateConfig);
+            if (plate) {
+                SetOutfitLabel(plate, number.c_str());
+                m_outfitRow->AddChild(plate);
+            }
+            // Recorded even when creation failed, so the vector stays index-aligned with
+            // m_outfitSlotList; the highlight walks the two in step.
+            m_outfitElements.push_back(plate);
+        }
+
+        // Save - a new outfit from whatever they have on
+        {
+            P3DUI::ElementConfig saveConfig = P3DUI::ElementConfig::Default("outfit_save");
+            saveConfig.texturePath = "textures\\VRDressup\\save.dds";
+            saveConfig.tooltip = L"Save current look as a new outfit";
+            saveConfig.scale = 1.2f;
+            saveConfig.facingMode = P3DUI::FacingMode::None;
+
+            auto* saveButton = m_api->CreateElement(saveConfig);
+            if (saveButton) {
+                Backdrop::ApplyOutfitPlate(saveButton, Backdrop::OutfitPlate::Idle);
+                m_outfitRow->AddChild(saveButton);
+            }
+        }
+
+        RefreshOutfitHighlight();
+        m_outfitRow->ResetScroll();
+
+        spdlog::debug("DressupMenuManager::RefreshOutfitRow - {} saved outfit(s), {} on",
+            m_outfitSlotList.size(), worn ? std::to_string(*worn) : "none");
+    }
+
+    // The number under a plate. Smaller and closer than the default label, so it stays
+    // clear of the row below when the gallery is open under this one.
+    static void SetOutfitLabel(P3DUI::Element* element, const wchar_t* text)
+    {
+        element->SetLabelText(text);
+        element->SetLabelTextScale(0.7f);
+        element->SetLabelOffset(0.0f, 0.0f, -6.5f);
+    }
+
+    // Which saved outfit the row should light up. The slot being edited, while it still
+    // matches the lock - so that of two identical snapshots the one the player picked stays
+    // lit, not the older one the store happens to list first.
+    std::optional<std::uint32_t> HighlightedOutfit() const
+    {
+        const auto worn = OutfitSlotManager::GetSingleton()->Worn(GetCurrentTargetActor());
+        if (worn && m_editingSlot) return m_editingSlot;
+        return worn;
+    }
+
+    // Re-tint the row in place.
+    void RefreshOutfitHighlight()
+    {
+        auto* slots = OutfitSlotManager::GetSingleton();
+        RE::Actor* npc = GetCurrentTargetActor();
+        const auto worn = HighlightedOutfit();
+
+        if (m_outfitDefaultElement) {
+            Backdrop::ApplyOutfitPlate(m_outfitDefaultElement,
+                slots->IsDefault(npc) ? Backdrop::OutfitPlate::Worn : Backdrop::OutfitPlate::Idle);
+        }
+
+        const size_t count = (std::min)(m_outfitElements.size(), m_outfitSlotList.size());
+        for (size_t i = 0; i < count; ++i) {
+            const bool isWorn = worn && m_outfitSlotList[i].id == *worn;
+            Backdrop::ApplyOutfitPlate(m_outfitElements[i],
+                !isWorn ? Backdrop::OutfitPlate::Idle
+                : m_outfitDeleteArmed ? Backdrop::OutfitPlate::Armed
+                                      : Backdrop::OutfitPlate::Worn);
+        }
+    }
+
+    // "Outfit N" for a slot id, by its position in the row.
+    std::wstring OutfitDisplayName(std::uint32_t id) const
+    {
+        for (size_t i = 0; i < m_outfitSlotList.size(); ++i) {
+            if (m_outfitSlotList[i].id == id) {
+                return L"Outfit " + std::to_wstring(i + 1);
+            }
+        }
+        return L"Outfit";
+    }
+
+    std::wstring DeleteTooltip(std::uint32_t id) const
+    {
+        return (m_outfitDeleteArmed ? L"Press again to delete " : L"Delete ") + OutfitDisplayName(id);
+    }
+
+    // Shown while the row is open and a saved outfit is the one being written to.
+    void UpdateEditingText()
+    {
+        if (!m_editingText) return;
+
+        if (m_outfitRowVisible && m_editingSlot && HighlightedOutfit() == m_editingSlot) {
+            const std::wstring text = L"Editing " + OutfitDisplayName(*m_editingSlot);
+            m_editingText->SetText(text.c_str());
+            m_editingText->SetVisible(true);
+        } else {
+            m_editingText->SetText(L"");
+            m_editingText->SetVisible(false);
+        }
+    }
+
+    // Take the delete button back out of its confirmation state.
+    void DisarmOutfitDelete()
+    {
+        if (!m_outfitDeleteArmed) return;
+        m_outfitDeleteArmed = false;
+
+        if (m_outfitDeleteButton) {
+            m_outfitDeleteButton->SetTexture("textures\\VRDressup\\minus.dds");
+            if (const auto worn = HighlightedOutfit()) {
+                m_outfitDeleteButton->SetTooltip(DeleteTooltip(*worn).c_str());
+            }
+        }
+        RefreshOutfitHighlight();
+    }
+
+    // Everything that follows a change of which outfit is on: the wheel's worn marks, the
+    // undress button, the row itself, and the editing text.
+    void AfterOutfitChange()
+    {
+        RefreshItemSpiral();
+        PopulateHandleRow();
+        RefreshOutfitRow();
+        UpdateEditingText();
+        ScheduleSettleRepaint();
+    }
+
+    // An edit was just made in the wheel. If the outfit row is open on a saved outfit,
+    // that outfit follows the edit.
+    //
+    // Called at the end of the click handlers - after InventoryManager / UndressManager
+    // have returned and the ScopedLockSuspension inside them has folded the change into
+    // "locked" - rather than from the equip event, which the engine raises from inside the
+    // equip call, before any of that has happened.
+    void AfterGearEdit()
+    {
+        if (!m_outfitRowVisible) return;
+
+        RE::Actor* npc = GetCurrentTargetActor();
+        auto* slots = OutfitSlotManager::GetSingleton();
+
+        const bool hadDelete = m_outfitDeleteButton != nullptr;
+
+        if (m_editingSlot) {
+            slots->SyncEdited(npc, *m_editingSlot);
+        }
+
+        // An edit on an unlocked NPC locks them to a look no outfit holds, which changes
+        // what the row offers (no delete, nothing lit); otherwise only tints move.
+        if (HighlightedOutfit().has_value() != hadDelete) {
+            RefreshOutfitRow();
+        } else {
+            RefreshOutfitHighlight();
+        }
+        UpdateEditingText();
+    }
+
+    void OnOutfitDefaultClicked()
+    {
+        DisarmOutfitDelete();
+
+        RE::Actor* npc = GetCurrentTargetActor();
+        auto* slots = OutfitSlotManager::GetSingleton();
+        if (!npc || slots->IsDefault(npc)) {
+            RefreshOutfitHighlight();
             return;
         }
 
-        RE::Actor* targetActor = invMgr->GetTargetActor();
-        std::string npcName = targetActor ? targetActor->GetName() : "NPC";
+        spdlog::info("DressupMenuManager::OnOutfitDefaultClicked - '{}'", npc->GetName());
+        slots->SelectDefault(npc);
+        m_editingSlot.reset();
+        AfterOutfitChange();
+    }
 
-        spdlog::info("DressupMenuManager::OnReturnPlayerItems - Returning items from '{}'", npcName);
+    void OnOutfitSelected(int index)
+    {
+        DisarmOutfitDelete();
 
-        invMgr->ReturnPlayerItems();
+        if (index < 0 || index >= static_cast<int>(m_outfitSlotList.size())) {
+            spdlog::warn("DressupMenuManager::OnOutfitSelected - Invalid index: {}", index);
+            return;
+        }
 
-        // Refresh UI - items have changed
-        RefreshItemSpiral();
-        PopulateHandleRow();
+        RE::Actor* npc = GetCurrentTargetActor();
+        auto* slots = OutfitSlotManager::GetSingleton();
+        const std::uint32_t id = m_outfitSlotList[index].id;
+
+        // Already on: nothing to put on, and the click doubles as a cancel for the delete.
+        if (HighlightedOutfit() == id) {
+            RefreshOutfitHighlight();
+            return;
+        }
+
+        spdlog::info("DressupMenuManager::OnOutfitSelected - Outfit {} (id {}) for '{}'",
+            index + 1, id, npc ? npc->GetName() : "?");
+        if (slots->Select(npc, id)) {
+            m_editingSlot = id;
+        }
+        AfterOutfitChange();
+    }
+
+    void OnOutfitSaveClicked()
+    {
+        DisarmOutfitDelete();
+
+        RE::Actor* npc = GetCurrentTargetActor();
+        if (!npc) return;
+
+        const std::uint32_t id = OutfitSlotManager::GetSingleton()->SaveCurrent(npc);
+        m_editingSlot = id;
+        AfterOutfitChange();
+
+        // Bring the new plate into view: it sits after Delete (present now, since the new
+        // outfit is on) and NPC Default.
+        if (m_outfitRow) {
+            for (size_t i = 0; i < m_outfitSlotList.size(); ++i) {
+                if (m_outfitSlotList[i].id == id) {
+                    m_outfitRow->ScrollToChild(static_cast<uint32_t>(i + 2));
+                    break;
+                }
+            }
+        }
+    }
+
+    // First press arms - the icon turns into a question mark and the outfit's plate goes
+    // red - and the second press deletes. Anything else pressed in between cancels.
+    void OnOutfitDeleteClicked()
+    {
+        const auto worn = HighlightedOutfit();
+        if (!worn) return;
+
+        if (!m_outfitDeleteArmed) {
+            m_outfitDeleteArmed = true;
+            if (m_outfitDeleteButton) {
+                m_outfitDeleteButton->SetTexture("textures\\VRDressup\\question.dds");
+                m_outfitDeleteButton->SetTooltip(DeleteTooltip(*worn).c_str());
+            }
+            RefreshOutfitHighlight();
+            return;
+        }
+
+        RE::Actor* npc = GetCurrentTargetActor();
+        spdlog::info("DressupMenuManager::OnOutfitDeleteClicked - Deleting outfit id {} of '{}'",
+            *worn, npc ? npc->GetName() : "?");
+
+        m_outfitDeleteArmed = false;
+        OutfitSlotManager::GetSingleton()->Remove(npc, *worn);
+        m_editingSlot.reset();
+        AfterOutfitChange();
     }
 
     // Who the undress button acts on: the player in player mode, the NPC otherwise.
@@ -953,6 +1331,7 @@ private:
         // Refresh UI - equipped items changed, lock state may have changed
         RefreshItemSpiral();
         PopulateHandleRow();
+        AfterGearEdit();
     }
 
     // Callback: Mod gallery toggle button clicked
@@ -1020,10 +1399,42 @@ private:
             }
         }
 
+        LayoutRows();
         RefreshGalleryRow();
         RefreshItemSpiral();
         PopulateHandleRow();
         UpdateInfoText();
+    }
+
+    // Stack whatever rows are open under the tool row, in a fixed order - outfits first,
+    // then the gallery - and put the info text under the lowest of them.
+    static constexpr float kToolRowZ = -10.5f;
+    static constexpr float kRowStepZ = 10.0f;
+    static constexpr float kEditingTextZ = -5.5f;  // between the wheel's handle and the tool row
+
+    float InfoTextZ() const
+    {
+        float z = kToolRowZ;
+        if (m_outfitRowVisible) z -= kRowStepZ;
+        if (IsGalleryVisible()) z -= kRowStepZ;
+        // With no row open the text sits a little closer, where it always has.
+        return (z == kToolRowZ) ? -18.0f : z - 8.0f;
+    }
+
+    void LayoutRows()
+    {
+        float z = kToolRowZ;
+        if (m_outfitRow && m_outfitRowVisible) {
+            z -= kRowStepZ;
+            m_outfitRow->SetLocalPosition(0, 0, z);
+        }
+        if (m_galleryRow && IsGalleryVisible()) {
+            z -= kRowStepZ;
+            m_galleryRow->SetLocalPosition(0, 0, z);
+        }
+        if (m_infoText) {
+            m_infoText->SetLocalPosition(0, 0, InfoTextZ());
+        }
     }
 
     // A background scan finished. The menu may have closed or switched gallery meanwhile.
@@ -1363,6 +1774,18 @@ public:
             m_galleryRow->SetVisible(false);
         }
 
+        // Clear outfit row state - the row, and with it the editing session, ends here
+        m_outfitRowVisible = false;
+        m_outfitDeleteArmed = false;
+        m_editingSlot.reset();
+        ForgetOutfitRowElements();
+        if (m_outfitRow) {
+            m_outfitRow->SetVisible(false);
+        }
+        if (m_editingText) {
+            m_editingText->SetVisible(false);
+        }
+
         // The gallery marks die with the session that made them.
         //
         // A mark means "the player is trying this on"; anything still worn when they close
@@ -1412,9 +1835,8 @@ private:
         // Don't update if showing hover text (hover takes precedence)
         if (m_showingHoverText) return;
 
-        // Determine position based on gallery visibility
-        float zPos = IsGalleryVisible() ? -28.0f : -18.0f;
-        m_infoText->SetLocalPosition(0, 0, zPos);
+        // Under whichever rows are open
+        m_infoText->SetLocalPosition(0, 0, InfoTextZ());
 
         // Determine what text to show
         if (IsShowingGalleryItems()) {
@@ -1440,9 +1862,8 @@ private:
 
         m_showingHoverText = true;
 
-        // Update position based on gallery visibility
-        float zPos = IsGalleryVisible() ? -28.0f : -18.0f;
-        m_infoText->SetLocalPosition(0, 0, zPos);
+        // Under whichever rows are open
+        m_infoText->SetLocalPosition(0, 0, InfoTextZ());
 
         m_infoText->SetText(text);
         m_infoText->SetVisible(true);
@@ -1459,7 +1880,6 @@ private:
     void OnItemSelected(int itemIndex)
     {
         auto* invMgr = InventoryManager::GetSingleton();
-        bool wasLocked = invMgr->IsNpcLocked();
 
         // If viewing a gallery category, equip from it
         if (IsShowingGalleryItems()) {
@@ -1485,13 +1905,13 @@ private:
             RefreshItemHighlight();
             ScheduleSettleRepaint();
 
-            // Refresh handle row if lock state or undress state changed
-            bool isLocked = invMgr->IsNpcLocked();
+            // Refresh handle row if undress state changed
             bool undressStateCleared = hadUndressState && targetActor &&
                 !UndressManager::GetSingleton()->HasUndressState(targetActor);
-            if (wasLocked != isLocked || undressStateCleared) {
+            if (undressStateCleared) {
                 PopulateHandleRow();
             }
+            AfterGearEdit();
             return;
         }
 
@@ -1525,11 +1945,11 @@ private:
         }
         ScheduleSettleRepaint();
 
-        // Refresh handle row if lock state or undress state changed
-        bool isLocked = invMgr->IsNpcLocked();
-        if (wasLocked != isLocked || undressStateCleared) {
+        // Refresh handle row if undress state changed
+        if (undressStateCleared) {
             PopulateHandleRow();
         }
+        AfterGearEdit();
     }
 
     // Just past ItemEquipHelper's kEquipGrace, so the sweep reads the state the grace has
@@ -1541,7 +1961,22 @@ private:
     P3DUI::Container* m_itemSpiral = nullptr;
     P3DUI::ScrollableContainer* m_handleRow = nullptr;   // ColumnGrid for handle buttons (single row)
     P3DUI::ScrollableContainer* m_galleryRow = nullptr;  // ColumnGrid for mod categories (horizontal scroll)
+    P3DUI::ScrollableContainer* m_outfitRow = nullptr;   // ColumnGrid of saved outfits (horizontal scroll)
     P3DUI::Text* m_infoText = nullptr;         // Context-dependent info text
+    P3DUI::Text* m_editingText = nullptr;      // "Editing Outfit N", between wheel and tool row
+
+    // Outfit row state. The slot list and the element vector are index-aligned, same rule
+    // as m_categoryElements. m_editingSlot is the saved outfit the wheel's edits are being
+    // written into: set when the row opens on a worn outfit, or by selecting or saving one;
+    // cleared by NPC Default, a delete, closing the row, or closing the menu. Never
+    // persisted - it is a property of this row being open.
+    bool m_outfitRowVisible = false;
+    bool m_outfitDeleteArmed = false;
+    std::optional<std::uint32_t> m_editingSlot;
+    std::vector<OutfitSlotManager::Slot> m_outfitSlotList;
+    std::vector<P3DUI::Element*> m_outfitElements;
+    P3DUI::Element* m_outfitDefaultElement = nullptr;
+    P3DUI::Element* m_outfitDeleteButton = nullptr;
 
     bool m_initialized = false;
     bool m_isLeftHand = false;

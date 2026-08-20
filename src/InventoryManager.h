@@ -401,47 +401,6 @@ public:
         m_transaction.Clear();
     }
 
-    // === Lock Management (delegates to OutfitLockManager) ===
-
-    bool IsNpcLocked() const
-    {
-        return m_targetActor && OutfitLockManager::GetSingleton()->IsLocked(m_targetActor);
-    }
-
-    // Unlock NPC (removes lock, NPC returns to normal AI outfit control)
-    bool UnlockNpc()
-    {
-        if (!m_targetActor) return false;
-
-        spdlog::info("InventoryManager::UnlockNpc - Unlocking '{}'", m_targetActor->GetName());
-        return OutfitLockManager::GetSingleton()->Unlock(m_targetActor);
-    }
-
-    // Manually lock NPC (prevents AI outfit changes)
-    bool LockNpc()
-    {
-        if (!m_targetActor) return false;
-
-        spdlog::info("InventoryManager::LockNpc - Locking '{}'", m_targetActor->GetName());
-        return OutfitLockManager::GetSingleton()->Lock(m_targetActor);
-    }
-
-    // Check if NPC has any items from player
-    bool HasPlayerItems() const
-    {
-        return m_targetActor && OutfitLockManager::GetSingleton()->HasPlayerItems(m_targetActor);
-    }
-
-    // Return all player items back to player's inventory
-    void ReturnPlayerItems()
-    {
-        if (!m_targetActor) return;
-
-        spdlog::info("InventoryManager::ReturnPlayerItems - Returning items to player from '{}'",
-            m_targetActor->GetName());
-        OutfitLockManager::GetSingleton()->ReturnPlayerItems(m_targetActor);
-    }
-
     // Equip item from mod gallery onto NPC (armor version)
     // Similar to EquipFromPlayer but adds item directly to NPC inventory
     void EquipFromMod(RE::TESObjectARMO* armor)
