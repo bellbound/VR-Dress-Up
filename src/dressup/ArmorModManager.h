@@ -4,6 +4,8 @@
 #include <SKSE/SKSE.h>
 #include <vector>
 #include <string>
+#include <string_view>
+#include <cctype>
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
@@ -12,6 +14,34 @@
 #include <mutex>
 #include "GalleryStateManager.h"
 #include "../log.h"
+
+// The base game's own plugins. Gallery lists sort these last: someone browsing for
+// something to wear has already seen every vanilla piece a hundred times, so the
+// mod-added items are what they came for.
+inline bool IsVanillaPlugin(std::string_view pluginName)
+{
+    static constexpr std::string_view kVanilla[] = {
+        "skyrim.esm", "update.esm", "dawnguard.esm", "hearthfires.esm", "dragonborn.esm"
+    };
+
+    for (auto candidate : kVanilla) {
+        if (candidate.size() != pluginName.size()) continue;
+
+        if (std::equal(candidate.begin(), candidate.end(), pluginName.begin(), [](char lower, char actual) {
+                return lower == static_cast<char>(std::tolower(static_cast<unsigned char>(actual)));
+            })) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+inline bool IsVanillaArmor(RE::TESObjectARMO* armor)
+{
+    auto* file = armor ? armor->GetFile(0) : nullptr;
+    return file && IsVanillaPlugin(file->GetFilename());
+}
 
 // Cached mod category info (lightweight, built at startup)
 struct ModCategoryInfo

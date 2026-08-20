@@ -149,6 +149,61 @@ namespace
         }
     }
 
+    // "allFromEsp" may be a single plugin name or a list of them. Stored lowercased so the
+    // match against TESFile::GetFilename() never depends on how the name was typed.
+    void AddPluginNames(const nlohmann::json& parent, const char* key, const std::string& categoryName,
+        std::vector<std::string>& out)
+    {
+        auto it = parent.find(key);
+        if (it == parent.end()) return;
+
+        const auto add = [&](const nlohmann::json& entry) {
+            if (!entry.is_string()) return;
+
+            std::string name = entry.get<std::string>();
+            std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+
+            while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back()))) name.pop_back();
+            if (name.empty()) return;
+
+            if (std::find(out.begin(), out.end(), name) == out.end()) out.push_back(name);
+        };
+
+        if (it->is_string()) {
+            add(*it);
+        } else if (it->is_array()) {
+            for (const auto& entry : *it) add(entry);
+        } else {
+            spdlog::warn("KeywordCategoryManager: '{}' has a '{}' that is neither a string nor a list, ignored",
+                categoryName, key);
+        }
+    }
+
+    // True when any of the patterns hits the item, using the same rules as the keyword lists:
+    // whole-word (or word-pair) tokens, "foo*" prefixes, and substring for three words or more.
+    bool AnyPatternMatches(const std::vector<std::string>& phrases, const std::vector<std::string>& longPhrases,
+        const std::vector<std::string>& prefixes, const std::vector<std::string>& words,
+        const std::vector<std::string>& tokens, const std::string& paddedName)
+    {
+        for (const auto& phrase : phrases) {
+            if (std::find(tokens.begin(), tokens.end(), phrase) != tokens.end()) return true;
+        }
+
+        for (const auto& prefix : prefixes) {
+            for (const auto& word : words) {
+                if (word.starts_with(prefix)) return true;
+            }
+        }
+
+        for (const auto& phrase : longPhrases) {
+            if (paddedName.find(phrase) != std::string::npos) return true;
+        }
+
+        return false;
+    }
+
     bool ParseCategory(const nlohmann::json& node, const std::string& file, KeywordCategoryDef& out)
     {
         if (!node.is_object()) {
@@ -168,11 +223,23 @@ namespace
         AddPatterns(node, "keywords", out.name, out.phrases, out.longPhrases, out.prefixes);
         AddPatterns(node, "exclude", out.name, out.excludePhrases, out.excludeLongPhrases, out.excludePrefixes);
 
+        AddPluginNames(node, "allFromEsp", out.name, out.allFromEsp);
+        AddPatterns(node, "allFromEspExcludeKeywords", out.name,
+            out.allFromEspExcludePhrases, out.allFromEspExcludeLongPhrases, out.allFromEspExcludePrefixes);
+
+        if (out.allFromEsp.empty() &&
+            !(out.allFromEspExcludePhrases.empty() && out.allFromEspExcludeLongPhrases.empty() &&
+              out.allFromEspExcludePrefixes.empty())) {
+            spdlog::warn("KeywordCategoryManager: category '{}' in '{}' has allFromEspExcludeKeywords "
+                "but no allFromEsp, so the exclusions do nothing", out.name, file);
+        }
+
         out.requireSlots = ParseSlotMask(node, "slots", out.name);
         out.excludeSlots = ParseSlotMask(node, "excludeSlots", out.name);
 
-        if (out.phrases.empty() && out.longPhrases.empty() && out.prefixes.empty()) {
-            spdlog::warn("KeywordCategoryManager: category '{}' in '{}' has no keywords, skipped", out.name, file);
+        if (out.phrases.empty() && out.longPhrases.empty() && out.prefixes.empty() && out.allFromEsp.empty()) {
+            spdlog::warn("KeywordCategoryManager: category '{}' in '{}' has neither keywords nor allFromEsp, skipped",
+                out.name, file);
             return false;
         }
 
@@ -282,6 +349,7 @@ bool KeywordCategoryManager::LoadDefinitions()
         for (const auto& prefix : def.excludePrefixes) m_prefixEntries.push_back({prefix, i, true});
         for (const auto& phrase : def.longPhrases) m_longPhraseEntries.push_back({phrase, i, false});
         for (const auto& phrase : def.excludeLongPhrases) m_longPhraseEntries.push_back({phrase, i, true});
+        for (const auto& plugin : def.allFromEsp) m_espIndex[plugin].push_back(i);
     }
 
     spdlog::info("KeywordCategoryManager: loaded {} categories from {} file(s)", m_defs.size(), fileCount);
@@ -362,6 +430,7 @@ void KeywordCategoryManager::BeginMatching()
         m_buckets.assign(m_defs.size(), Bucket{});
         m_hit.assign(m_defs.size(), 0);
         m_veto.assign(m_defs.size(), 0);
+        m_espHit.assign(m_defs.size(), 0);
         m_pendingArmor = std::move(armor);
         m_currentIndex = 0;
         m_progressFraction = 0.0f;
@@ -423,6 +492,23 @@ void KeywordCategoryManager::MatchArmor(RE::TESObjectARMO* armor)
 
     std::fill(m_hit.begin(), m_hit.end(), std::uint8_t{0});
     std::fill(m_veto.begin(), m_veto.end(), std::uint8_t{0});
+    std::fill(m_espHit.begin(), m_espHit.end(), std::uint8_t{0});
+
+    // Categories that take everything from this item's plugin, name notwithstanding.
+    bool anyEspHit = false;
+    if (!m_espIndex.empty()) {
+        if (auto* file = armor->GetFile(0)) {
+            std::string plugin(file->GetFilename());
+            std::transform(plugin.begin(), plugin.end(), plugin.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+
+            if (auto it = m_espIndex.find(plugin); it != m_espIndex.end()) {
+                for (auto category : it->second) m_espHit[category] = 1;
+                anyEspHit = true;
+            }
+        }
+    }
 
     CollectTokens(m_words, m_tokens);
     for (const auto& token : m_tokens) {
@@ -443,25 +529,39 @@ void KeywordCategoryManager::MatchArmor(RE::TESObjectARMO* armor)
         }
     }
 
-    if (!m_longPhraseEntries.empty()) {
-        const std::string padded = " " + JoinWords(m_words) + " ";
-        for (const auto& entry : m_longPhraseEntries) {
-            if (padded.find(entry.text) != std::string::npos) {
-                (entry.exclude ? m_veto : m_hit)[entry.category] = 1;
-            }
+    // The allFromEsp exclusions are checked per category below and need this too.
+    std::string padded;
+    if (!m_longPhraseEntries.empty() || anyEspHit) {
+        padded = " " + JoinWords(m_words) + " ";
+    }
+
+    for (const auto& entry : m_longPhraseEntries) {
+        if (padded.find(entry.text) != std::string::npos) {
+            (entry.exclude ? m_veto : m_hit)[entry.category] = 1;
         }
     }
 
     const auto slots = static_cast<std::uint32_t>(armor->GetSlotMask());
 
     for (size_t i = 0; i < m_defs.size(); ++i) {
-        if (!m_hit[i] || m_veto[i]) continue;
-
         const auto& def = m_defs[i];
-        if (def.requireSlots && !(slots & def.requireSlots)) continue;
-        if (def.excludeSlots && (slots & def.excludeSlots)) continue;
 
-        m_buckets[i].items.push_back(armor);
+        bool matched = m_hit[i] && !m_veto[i];
+        if (matched) {
+            if (def.requireSlots && !(slots & def.requireSlots)) matched = false;
+            if (def.excludeSlots && (slots & def.excludeSlots)) matched = false;
+        }
+
+        // Coming from a listed plugin is a second, independent way in. It ignores the
+        // keywords, the exclude list and the slot filters alike - that is what "all from
+        // this esp" means - so only allFromEspExcludeKeywords can veto it.
+        if (!matched && m_espHit[i]) {
+            matched = !AnyPatternMatches(def.allFromEspExcludePhrases, def.allFromEspExcludeLongPhrases,
+                def.allFromEspExcludePrefixes, m_words, m_tokens, padded);
+        }
+
+        // Either way the item lands here once, so an item both named and listed is not doubled.
+        if (matched) m_buckets[i].items.push_back(armor);
     }
 }
 

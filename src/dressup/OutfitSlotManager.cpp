@@ -6,6 +6,7 @@
 #include "FormKeyUtil.h"
 
 #include <algorithm>
+#include <cctype>
 #include <charconv>
 #include <spdlog/spdlog.h>
 
@@ -210,18 +211,22 @@ void OutfitSlotManager::SyncEdited(RE::Actor* actor, std::uint32_t id)
         lockMgr->GetOutfitNoWeapon(actor, name));
 }
 
-RE::TESObjectARMO* OutfitSlotManager::Representative(RE::Actor* actor, std::uint32_t id) const
+std::vector<RE::TESObjectARMO*> OutfitSlotManager::Pieces(RE::Actor* actor, std::uint32_t id) const
 {
-    if (!actor) return nullptr;
-
     std::vector<RE::TESObjectARMO*> pieces;
+    if (!actor) return pieces;
+
     for (const auto& key : OutfitLockManager::GetSingleton()->GetOutfitItemFormKeys(actor, NameOf(id))) {
         auto* armor = RE::TESForm::LookupByID<RE::TESObjectARMO>(
             Persistence::FormKeyUtil::ResolveToRuntimeFormID(key));
         if (armor) pieces.push_back(armor);
     }
-    if (pieces.empty()) return nullptr;
+    return pieces;
+}
 
+RE::TESObjectARMO* OutfitSlotManager::PickPiece(const std::vector<RE::TESObjectARMO*>& pieces,
+    const std::unordered_set<std::string>& avoid)
+{
     // The piece that says most about the look first: the body, then the head, then the
     // rest of the armour slots, then whatever is left - an amulet says little.
     using Slot = RE::BGSBipedObjectForm::BipedObjectSlot;
@@ -229,15 +234,64 @@ RE::TESObjectARMO* OutfitSlotManager::Representative(RE::Actor* actor, std::uint
         Slot::kBody, Slot::kHead, Slot::kHair, Slot::kFeet, Slot::kHands, Slot::kCalves,
         Slot::kForearms, Slot::kShield, Slot::kTail, Slot::kCirclet,
     };
+
+    const auto usable = [&avoid](RE::TESObjectARMO* armor) {
+        if (avoid.empty()) return true;
+        std::string path = ItemEquipHelper::GetModelPath(armor);
+        std::transform(path.begin(), path.end(), path.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return path.empty() || avoid.find(path) == avoid.end();
+    };
+
     for (const Slot slot : kPreferred) {
         for (auto* armor : pieces) {
             if ((static_cast<std::uint32_t>(armor->GetSlotMask()) &
-                 static_cast<std::uint32_t>(slot)) != 0) {
+                 static_cast<std::uint32_t>(slot)) != 0 && usable(armor)) {
                 return armor;
             }
         }
     }
-    return pieces.front();
+
+    for (auto* armor : pieces) {
+        if (usable(armor)) return armor;
+    }
+    return nullptr;
+}
+
+RE::TESObjectARMO* OutfitSlotManager::Representative(RE::Actor* actor, std::uint32_t id) const
+{
+    return PickPiece(Pieces(actor, id), {});
+}
+
+std::vector<RE::TESObjectARMO*> OutfitSlotManager::Representatives(
+    RE::Actor* actor, const std::vector<Slot>& slots) const
+{
+    std::vector<RE::TESObjectARMO*> result(slots.size(), nullptr);
+
+    // A plate shows one piece, and outfits built out of one wardrobe share pieces: three
+    // looks that all keep the same cuirass and change what is under it came out as the
+    // same picture three times, which told the player nothing. So the row is picked as a
+    // row - each plate prefers a mesh no plate to its left is already showing, and only
+    // falls back to its own best piece when the outfit really has nothing of its own.
+    std::unordered_set<std::string> taken;
+
+    for (size_t i = 0; i < slots.size(); ++i) {
+        const auto pieces = Pieces(actor, slots[i].id);
+        if (pieces.empty()) continue;
+
+        result[i] = PickPiece(pieces, taken);
+        if (!result[i]) result[i] = PickPiece(pieces, {});
+        if (!result[i]) continue;
+
+        std::string path = ItemEquipHelper::GetModelPath(result[i]);
+        std::transform(path.begin(), path.end(), path.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (!path.empty()) taken.insert(std::move(path));
+    }
+
+    return result;
 }
 
 void OutfitSlotManager::ApplyHands(RE::Actor* actor, bool noWeapon) const

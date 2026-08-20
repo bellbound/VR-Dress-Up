@@ -3,6 +3,7 @@
 #include <RE/Skyrim.h>
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <Windows.h>
 #include "InventoryManager.h"
@@ -12,6 +13,7 @@
 #include "api/ThreeDUIInterface001.h"
 #include "dressup/UndressManager.h"
 #include "dressup/ArmorModManager.h"
+#include "dressup/Backdrop.h"
 #include "dressup/GalleryStateManager.h"
 #include "dressup/KeywordCategoryManager.h"
 #include "dressup/ItemEquipHelper.h"
@@ -36,90 +38,6 @@ inline std::wstring ToWide(const std::string& str) {
 // The plate an element sits on. The gradient sphere replaces the older cloud one because
 // its material is a BSEffectShaderProperty, which is the only kind 3DUI can tint - the
 // cloud mesh is a lighting-shader mesh and silently ignored SetBackgroundColor.
-namespace Backdrop
-{
-    constexpr const char* kModel = "meshes\\3DUI\\gradient-background-sphere.nif";
-
-    // Scales are absolute since 3DUI 0.10.6: the backdrop no longer inherits the fit
-    // correction the element derives from its preview model's bounds, so one value is one
-    // size for a whole row instead of one size per model. A unit sphere at scale S comes
-    // out S/2 units across, so each of these is set just inside its row's spacing - a
-    // backdrop wider than the gap between two elements reads as one smeared plate.
-    constexpr float kCategoryScale = 20.0f;  // gallery row, 12.0 column spacing
-    constexpr float kItemScale     = 14.0f;  // item spiral, 8.0 item spacing
-
-    // rgb is the hue, a the opacity, glow the emissive strength. The mesh authors a bright
-    // blue (0.24, 0.78, 1.0) at glow 2.4, which is far too loud for a whole row of plates,
-    // so everything here is read against that rather than against a flat sRGB swatch.
-    struct Tint
-    {
-        float r, g, b, a, glow;
-    };
-
-    // A category nobody has picked: the near-grey the skin overlay menu rests its pack
-    // covers on, there to give the artwork an edge to sit against rather than to say
-    // "pick me".
-    constexpr Tint kCategoryIdle = {0.55f, 0.62f, 0.72f, 1.00f, 1.00f};
-
-    // The category the spiral is currently showing. One step up in the same direction
-    // rather than a different colour: the hue commits to the mesh's blue and the glow
-    // roughly doubles, which is enough to pick it out of the row at a glance without the
-    // row turning into a light show.
-    constexpr Tint kCategorySelected = {0.45f, 0.68f, 1.00f, 1.00f, 1.90f};
-
-    // An item the actor is not wearing - the one a click will put on. Warm rather than one
-    // more step along the blue, because the gallery row already owns the blue and a
-    // brighter blue here would read as "selected" rather than "there for the taking".
-    //
-    // This is the loud one, and it is deliberately the *un*equipped state: a wheel of
-    // gear is a wheel of choices, so what stands out should be what a click would change,
-    // not what is already settled. Reading it the other way round meant a fully dressed
-    // NPC lit the whole spiral up and the pieces still on offer were the dim ones.
-    constexpr Tint kItemAvailable = {1.00f, 0.72f, 0.42f, 1.00f, 1.70f};
-
-    // An item the actor already has on: the same near-grey plate an unpicked category
-    // rests on. It was a third of this opaque and barely glowing at one point, on the
-    // reasoning that dozens at once would drown out the items, but in the headset that
-    // read as no plate at all - the items floated against whatever the player happened to
-    // be standing in front of.
-    constexpr Tint kItemEquipped = kCategoryIdle;
-
-    // The one place that puts a backdrop on an element, so every row agrees about which
-    // mesh it is.
-    inline void Apply(P3DUI::Element* element, float scale, const Tint& tint)
-    {
-        if (!element) return;
-        element->SetBackgroundModel(kModel);
-        element->SetBackgroundScale(scale);
-        element->SetBackgroundColor(tint.r, tint.g, tint.b, tint.a, tint.glow);
-    }
-
-    inline void ApplyCategory(P3DUI::Element* element, bool selected)
-    {
-        Apply(element, kCategoryScale, selected ? kCategorySelected : kCategoryIdle);
-    }
-
-    inline void ApplyItem(P3DUI::Element* element, bool equipped = false)
-    {
-        Apply(element, kItemScale, equipped ? kItemEquipped : kItemAvailable);
-    }
-
-    // A saved outfit the player has armed for deletion: the worn plate, turned red. The
-    // only red in the menu, so it cannot be mistaken for a selection.
-    constexpr Tint kOutfitArmed = {1.00f, 0.30f, 0.25f, 1.00f, 1.90f};
-
-    // The outfit row's plates share the gallery row's size and its idle/selected pair.
-    enum class OutfitPlate : std::uint8_t { Idle, Worn, Armed };
-
-    inline void ApplyOutfitPlate(P3DUI::Element* element, OutfitPlate state)
-    {
-        Apply(element, kCategoryScale,
-            state == OutfitPlate::Armed ? kOutfitArmed
-            : state == OutfitPlate::Worn ? kCategorySelected
-                                         : kCategoryIdle);
-    }
-}
-
 // What the shared row below the wheel is currently showing. Only one at a time.
 enum class GalleryMode : std::uint8_t
 {
@@ -240,8 +158,12 @@ public:
 
         // === Create Outfit Row (ColumnGrid of saved looks - same shape as the gallery row) ===
         P3DUI::ColumnGridConfig outfitConfig = P3DUI::ColumnGridConfig::Default("outfit_row");
-        outfitConfig.columnSpacing = 12.0f;
-        outfitConfig.visibleWidth = 48.0f;
+        // Tighter and wider than the gallery row: its plates are icons and numbered
+        // snapshots rather than armour to study, so more of them on screen beats bigger
+        // ones. -10% spacing against the gallery's 12.0, +10% visible width against its
+        // 48.0, and Backdrop::kOutfitScale sizes the plate to sit inside the new gap.
+        outfitConfig.columnSpacing = 10.8f;
+        outfitConfig.visibleWidth = 52.8f;
         outfitConfig.numRows = 1;
 
         m_outfitRow = m_api->CreateColumnGrid(outfitConfig);
@@ -370,9 +292,15 @@ public:
             }
         }
 
-        // Clear any existing items from item spiral
-        if (m_itemSpiral) {
-            m_itemSpiral->Clear();
+        // Clear any existing items from item spiral. PopulateHandleRow runs before the
+        // spiral is refilled, so the vector has to be emptied here rather than left to
+        // RefreshItemSpiral - see the note there.
+        {
+            std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
+            m_itemElements.clear();
+            if (m_itemSpiral) {
+                m_itemSpiral->Clear();
+            }
         }
 
         // Populate handle row with inventory source selectors and handle
@@ -659,8 +587,14 @@ private:
     {
         if (!m_itemSpiral || !m_api) return;
 
-        m_itemSpiral->Clear();
+        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
+
+        // Forget the pointers before the container destroys what they point at. Clear()
+        // tombstones every child, so between the two calls the vector names dead elements -
+        // and RefreshItemHighlight, which runs from a queued task, walks exactly this
+        // vector. Done in this order there is no moment where it can find one.
         m_itemElements.clear();
+        m_itemSpiral->Clear();
 
         // Item 0: Anchor handle (Close/Grab) - always first in spiral
         P3DUI::ElementConfig anchorConfig = P3DUI::ElementConfig::Default("anchor_handle");
@@ -760,6 +694,8 @@ private:
     // it - dozens of models re-read from disk - to change one plate's colour.
     void RefreshItemHighlight()
     {
+        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
+
         // Parenthesised: Windows.h defines min as a macro.
         if (IsShowingGalleryItems()) {
             const size_t count = (std::min)(m_itemElements.size(), m_galleryArmorList.size());
@@ -824,6 +760,8 @@ private:
     // Refresh item spiral with armor from the active gallery category (mod or keyword)
     void RefreshItemSpiralWithGalleryArmor()
     {
+        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
+
         m_galleryArmorList = !m_activeModCategory.empty()
             ? ArmorModManager::GetSingleton()->GetArmorForMod(m_activeModCategory)
             : KeywordCategoryManager::GetSingleton()->GetItemsForCategory(m_activeKeywordCategory);
@@ -840,6 +778,12 @@ private:
                 const char* nameB = b ? b->GetFullName() : "";
                 return _stricmp(nameA, nameB) < 0;
             });
+
+        // Then push the base game's own items behind every mod-added one, each half still
+        // alphabetical. A category like Boots is otherwise led by the vanilla set the player
+        // has worn since level one, and whatever they installed the mod for sits pages away.
+        std::stable_partition(m_galleryArmorList.begin(), m_galleryArmorList.end(),
+            [](RE::TESObjectARMO* armor) { return !IsVanillaArmor(armor); });
 
         // Add armor items to spiral
         for (size_t i = 0; i < m_galleryArmorList.size(); ++i) {
@@ -922,12 +866,15 @@ private:
     {
         m_outfitRowVisible = visible;
         m_outfitDeleteArmed = false;
+        m_switchArmed = kNothingArmed;
 
         if (visible) {
             m_editingSlot = OutfitSlotManager::GetSingleton()->Worn(GetCurrentTargetActor());
             RefreshOutfitRow();  // shows the row once it is full
         } else {
             m_editingSlot.reset();
+
+            std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
             ForgetOutfitRowElements();
             if (m_outfitRow) {
                 m_outfitRow->Clear();
@@ -959,12 +906,14 @@ private:
     {
         if (!IsMenuOpen() || !m_outfitRow || !m_api || !m_outfitRowVisible) return;
 
+        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
+
         // Filled hidden and shown at the end. An element created into a visible container
         // spawns at the container's centre and flies out to its slot; created into a hidden
         // one it skips the spawn and is simply there when the row appears.
         m_outfitRow->SetVisible(false);
+        ForgetOutfitRowElements();  // before Clear - see RefreshItemSpiral
         m_outfitRow->Clear();
-        ForgetOutfitRowElements();
 
         auto* slots = OutfitSlotManager::GetSingleton();
         RE::Actor* npc = GetCurrentTargetActor();
@@ -994,8 +943,11 @@ private:
         // NPC Default - the game's own outfit, i.e. unlocked
         {
             P3DUI::ElementConfig defaultConfig = P3DUI::ElementConfig::Default("outfit_default");
-            defaultConfig.texturePath = "textures\\VRDressup\\npc.dds";
-            defaultConfig.tooltip = L"NPC Default";
+            defaultConfig.texturePath = m_switchArmed == kDefaultPlate
+                ? "textures\\VRDressup\\question.dds"
+                : "textures\\VRDressup\\npc.dds";
+            const std::wstring defaultTooltip = SwitchTooltip(kDefaultPlate);
+            defaultConfig.tooltip = defaultTooltip.c_str();
             defaultConfig.scale = 1.2f;
             defaultConfig.facingMode = P3DUI::FacingMode::None;
 
@@ -1008,12 +960,31 @@ private:
             }
         }
 
-        // One plate per saved outfit, numbered by position
+        // Save - a new outfit from whatever they have on. Next to NPC Default rather than
+        // after the outfits: the two of them are what the row *does*, and pushing Save past
+        // every saved look meant scrolling to reach the button that makes one.
+        {
+            P3DUI::ElementConfig saveConfig = P3DUI::ElementConfig::Default("outfit_save");
+            saveConfig.texturePath = "textures\\VRDressup\\save.dds";
+            saveConfig.tooltip = L"Save current look as a new outfit";
+            saveConfig.scale = 1.2f;
+            saveConfig.facingMode = P3DUI::FacingMode::None;
+
+            auto* saveButton = m_api->CreateElement(saveConfig);
+            if (saveButton) {
+                Backdrop::ApplyOutfitPlate(saveButton, Backdrop::OutfitPlate::Idle);
+                m_outfitRow->AddChild(saveButton);
+            }
+        }
+
+        // One plate per saved outfit, numbered by position. The preview pieces are picked
+        // for the row at once so two outfits sharing a cuirass do not draw the same plate.
+        const auto previews = slots->Representatives(npc, m_outfitSlotList);
+
         for (size_t i = 0; i < m_outfitSlotList.size(); ++i) {
-            const auto& slot = m_outfitSlotList[i];
             const std::string elementId = "outfit_" + std::to_string(i);
             const std::wstring number = std::to_wstring(i + 1);
-            const std::wstring tooltip = L"Outfit " + number;
+            const std::wstring tooltip = SwitchTooltip(static_cast<int>(i));
 
             P3DUI::ElementConfig plateConfig = P3DUI::ElementConfig::Default(elementId.c_str());
             plateConfig.tooltip = tooltip.c_str();
@@ -1022,7 +993,7 @@ private:
             // Shown as one of its own pieces, the way a category is. An empty outfit - an
             // undressed NPC, saved - has no piece to show and gets the undressed figure.
             std::string modelPath;
-            if (auto* armor = slots->Representative(npc, slot.id)) {
+            if (auto* armor = previews[i]) {
                 plateConfig.scale = 1.0f;
                 plateConfig.formID = armor->GetFormID();
                 modelPath = ItemEquipHelper::GetModelPath(armor);
@@ -1040,21 +1011,6 @@ private:
             // Recorded even when creation failed, so the vector stays index-aligned with
             // m_outfitSlotList; the highlight walks the two in step.
             m_outfitElements.push_back(plate);
-        }
-
-        // Save - a new outfit from whatever they have on
-        {
-            P3DUI::ElementConfig saveConfig = P3DUI::ElementConfig::Default("outfit_save");
-            saveConfig.texturePath = "textures\\VRDressup\\save.dds";
-            saveConfig.tooltip = L"Save current look as a new outfit";
-            saveConfig.scale = 1.2f;
-            saveConfig.facingMode = P3DUI::FacingMode::None;
-
-            auto* saveButton = m_api->CreateElement(saveConfig);
-            if (saveButton) {
-                Backdrop::ApplyOutfitPlate(saveButton, Backdrop::OutfitPlate::Idle);
-                m_outfitRow->AddChild(saveButton);
-            }
         }
 
         RefreshOutfitHighlight();
@@ -1087,22 +1043,29 @@ private:
     // Re-tint the row in place.
     void RefreshOutfitHighlight()
     {
+        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
+
         auto* slots = OutfitSlotManager::GetSingleton();
         RE::Actor* npc = GetCurrentTargetActor();
         const auto worn = HighlightedOutfit();
 
         if (m_outfitDefaultElement) {
             Backdrop::ApplyOutfitPlate(m_outfitDefaultElement,
-                slots->IsDefault(npc) ? Backdrop::OutfitPlate::Worn : Backdrop::OutfitPlate::Idle);
+                m_switchArmed == kDefaultPlate ? Backdrop::OutfitPlate::Armed
+                : slots->IsDefault(npc)        ? Backdrop::OutfitPlate::Worn
+                                               : Backdrop::OutfitPlate::Idle);
         }
 
         const size_t count = (std::min)(m_outfitElements.size(), m_outfitSlotList.size());
         for (size_t i = 0; i < count; ++i) {
             const bool isWorn = worn && m_outfitSlotList[i].id == *worn;
+
+            // Red means the same thing on both prompts: press again and something goes.
             Backdrop::ApplyOutfitPlate(m_outfitElements[i],
-                !isWorn ? Backdrop::OutfitPlate::Idle
-                : m_outfitDeleteArmed ? Backdrop::OutfitPlate::Armed
-                                      : Backdrop::OutfitPlate::Worn);
+                m_switchArmed == static_cast<int>(i)   ? Backdrop::OutfitPlate::Armed
+                : !isWorn                              ? Backdrop::OutfitPlate::Idle
+                : m_outfitDeleteArmed                  ? Backdrop::OutfitPlate::Armed
+                                                       : Backdrop::OutfitPlate::Worn);
         }
     }
 
@@ -1122,19 +1085,137 @@ private:
         return (m_outfitDeleteArmed ? L"Press again to delete " : L"Delete ") + OutfitDisplayName(id);
     }
 
-    // Shown while the row is open and a saved outfit is the one being written to.
+    // Is the NPC in a look that no saved outfit holds and nothing will bring back?
+    //
+    // They are locked to it, so it survives the menu closing, but it lives nowhere the row
+    // can reach - and putting an outfit on replaces it with no way back. That is worth a
+    // second press, the same as a delete: both throw away something the player made.
+    bool NeedsSwitchConfirmation() const
+    {
+        auto* slots = OutfitSlotManager::GetSingleton();
+        RE::Actor* npc = GetCurrentTargetActor();
+        if (!npc) return false;
+
+        return !slots->IsDefault(npc) && !slots->Worn(npc);
+    }
+
+    // `plate` is an outfit's row index, or kDefaultPlate.
+    std::wstring SwitchTooltip(int plate) const
+    {
+        const std::wstring name = plate == kDefaultPlate
+            ? L"NPC Default"
+            : OutfitDisplayName(plate >= 0 && plate < static_cast<int>(m_outfitSlotList.size())
+                ? m_outfitSlotList[plate].id : 0);
+
+        if (m_switchArmed == plate) {
+            return L"Press again for " + name + L" - the look they have on is not saved";
+        }
+        return name;
+    }
+
+    // Take a switch back out of its confirmation state.
+    void DisarmOutfitSwitch()
+    {
+        if (m_switchArmed == kNothingArmed) return;
+        const int was = m_switchArmed;
+        m_switchArmed = kNothingArmed;
+
+        if (was == kDefaultPlate && m_outfitDefaultElement) {
+            m_outfitDefaultElement->SetTexture("textures\\VRDressup\\npc.dds");
+        }
+        RefreshOutfitHighlight();
+        UpdateEditingText();
+    }
+
+    // Every prompt the row can be showing, cancelled. Any press that is not the second half
+    // of the prompt it belongs to lands here first.
+    void DisarmOutfitPrompts()
+    {
+        DisarmOutfitDelete();
+        DisarmOutfitSwitch();
+    }
+
+    // The first press of a switch that would throw an unsaved look away. True when the
+    // caller should stop and wait for the second press.
+    bool ArmSwitchIfNeeded(int plate)
+    {
+        if (m_switchArmed == plate) {
+            m_switchArmed = kNothingArmed;   // the second press: go ahead
+            return false;
+        }
+        if (!NeedsSwitchConfirmation()) return false;
+
+        DisarmOutfitSwitch();
+        m_switchArmed = plate;
+
+        if (plate == kDefaultPlate && m_outfitDefaultElement) {
+            m_outfitDefaultElement->SetTexture("textures\\VRDressup\\question.dds");
+        }
+        RetintSwitchTooltips();
+        RefreshOutfitHighlight();
+        UpdateEditingText();
+        return true;
+    }
+
+    // The armed plate says what a second press costs; every other plate says its own name.
+    void RetintSwitchTooltips()
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
+
+        if (m_outfitDefaultElement) {
+            m_outfitDefaultElement->SetTooltip(SwitchTooltip(kDefaultPlate).c_str());
+        }
+        for (size_t i = 0; i < m_outfitElements.size(); ++i) {
+            if (m_outfitElements[i]) {
+                m_outfitElements[i]->SetTooltip(SwitchTooltip(static_cast<int>(i)).c_str());
+            }
+        }
+    }
+
+    // Is the wheel writing into a saved outfit right now?
+    bool IsEditingOutfit() const
+    {
+        return m_outfitRowVisible && m_editingSlot && HighlightedOutfit() == m_editingSlot;
+    }
+
+    // The line between the wheel and the tool row. It has three things to say, in order of
+    // urgency: a prompt is waiting, the wheel is writing into a saved outfit, or the look
+    // on the NPC belongs to no outfit and will not survive the next switch.
     void UpdateEditingText()
     {
         if (!m_editingText) return;
 
-        if (m_outfitRowVisible && m_editingSlot && HighlightedOutfit() == m_editingSlot) {
-            const std::wstring text = L"Editing " + OutfitDisplayName(*m_editingSlot);
-            m_editingText->SetText(text.c_str());
-            m_editingText->SetVisible(true);
-        } else {
-            m_editingText->SetText(L"");
-            m_editingText->SetVisible(false);
+        std::wstring text;
+        if (m_outfitRowVisible) {
+            if (m_switchArmed != kNothingArmed) {
+                text = L"The look they have on is not saved - press again to lose it";
+            } else if (IsEditingOutfit()) {
+                text = L"Editing " + OutfitDisplayName(*m_editingSlot);
+            } else if (NeedsSwitchConfirmation()) {
+                text = L"Unsaved look - press save to keep it";
+            }
         }
+
+        m_editingText->SetText(text.c_str());
+        m_editingText->SetVisible(!text.empty());
+
+        UpdateBackdropScheme();
+    }
+
+    // Editing a saved outfit turns every plate in the menu warm.
+    //
+    // The text above says the same thing, but the player's eyes are on the wheel they are
+    // clicking, not on a line above it - and this is the one mode where a click changes
+    // something that outlives the session. Repainting is three in-place re-tints; nothing
+    // is rebuilt, and rows built while the scheme is on pick it up from Backdrop::Current.
+    void UpdateBackdropScheme()
+    {
+        const auto wanted = IsEditingOutfit() ? Backdrop::Scheme::Editing : Backdrop::Scheme::Normal;
+        if (!Backdrop::SetScheme(wanted)) return;
+
+        RefreshItemHighlight();
+        RefreshCategoryHighlight();
+        RefreshOutfitHighlight();
     }
 
     // Take the delete button back out of its confirmation state.
@@ -1174,6 +1255,9 @@ private:
     {
         if (!m_outfitRowVisible) return;
 
+        // The look just moved, so a prompt about the look they had is stale.
+        DisarmOutfitSwitch();
+
         RE::Actor* npc = GetCurrentTargetActor();
         auto* slots = OutfitSlotManager::GetSingleton();
 
@@ -1200,9 +1284,12 @@ private:
         RE::Actor* npc = GetCurrentTargetActor();
         auto* slots = OutfitSlotManager::GetSingleton();
         if (!npc || slots->IsDefault(npc)) {
+            DisarmOutfitSwitch();
             RefreshOutfitHighlight();
             return;
         }
+
+        if (ArmSwitchIfNeeded(kDefaultPlate)) return;
 
         spdlog::info("DressupMenuManager::OnOutfitDefaultClicked - '{}'", npc->GetName());
         slots->SelectDefault(npc);
@@ -1223,11 +1310,14 @@ private:
         auto* slots = OutfitSlotManager::GetSingleton();
         const std::uint32_t id = m_outfitSlotList[index].id;
 
-        // Already on: nothing to put on, and the click doubles as a cancel for the delete.
+        // Already on: nothing to put on, and the click doubles as a cancel for the prompts.
         if (HighlightedOutfit() == id) {
+            DisarmOutfitSwitch();
             RefreshOutfitHighlight();
             return;
         }
+
+        if (ArmSwitchIfNeeded(index)) return;
 
         spdlog::info("DressupMenuManager::OnOutfitSelected - Outfit {} (id {}) for '{}'",
             index + 1, id, npc ? npc->GetName() : "?");
@@ -1239,7 +1329,7 @@ private:
 
     void OnOutfitSaveClicked()
     {
-        DisarmOutfitDelete();
+        DisarmOutfitPrompts();
 
         RE::Actor* npc = GetCurrentTargetActor();
         if (!npc) return;
@@ -1248,12 +1338,13 @@ private:
         m_editingSlot = id;
         AfterOutfitChange();
 
-        // Bring the new plate into view: it sits after Delete (present now, since the new
-        // outfit is on) and NPC Default.
+        // Bring the new plate into view. Ahead of it sit Delete (present now, since the new
+        // outfit is the one on), NPC Default and Save.
         if (m_outfitRow) {
+            const size_t offset = (m_outfitDeleteButton ? 1u : 0u) + 2u;
             for (size_t i = 0; i < m_outfitSlotList.size(); ++i) {
                 if (m_outfitSlotList[i].id == id) {
-                    m_outfitRow->ScrollToChild(static_cast<uint32_t>(i + 2));
+                    m_outfitRow->ScrollToChild(static_cast<uint32_t>(i + offset));
                     break;
                 }
             }
@@ -1264,6 +1355,8 @@ private:
     // red - and the second press deletes. Anything else pressed in between cancels.
     void OnOutfitDeleteClicked()
     {
+        DisarmOutfitSwitch();
+
         const auto worn = HighlightedOutfit();
         if (!worn) return;
 
@@ -1467,8 +1560,10 @@ private:
         // Bail out if menu is closed - UI elements may be invalid
         if (!IsMenuOpen() || !m_galleryRow || !m_api || m_galleryMode == GalleryMode::None) return;
 
+        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
+
+        m_categoryElements.clear();  // before Clear - see RefreshItemSpiral
         m_galleryRow->Clear();
-        m_categoryElements.clear();
 
         bool showingMods = (m_galleryMode == GalleryMode::Mods);
 
@@ -1528,6 +1623,8 @@ private:
     // scrolled to in order to make the selection.
     void RefreshCategoryHighlight()
     {
+        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
+
         const int active = ActiveCategoryIndex();
 
         for (size_t i = 0; i < m_categoryElements.size(); ++i) {
@@ -1761,7 +1858,8 @@ public:
         // Hide menu
         m_root->SetVisible(false);
 
-        // Clear item list
+        // Clear item list. Same lock as the rebuilds: a repaint task may be in flight.
+        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
         m_currentItemList.clear();
         m_itemElements.clear();
 
@@ -1782,6 +1880,8 @@ public:
         // Clear outfit row state - the row, and with it the editing session, ends here
         m_outfitRowVisible = false;
         m_outfitDeleteArmed = false;
+        m_switchArmed = kNothingArmed;
+        Backdrop::SetScheme(Backdrop::Scheme::Normal);
         m_editingSlot.reset();
         ForgetOutfitRowElements();
         if (m_outfitRow) {
@@ -1961,6 +2061,10 @@ private:
     // already given up on rather than racing it.
     static constexpr std::int32_t kSettleRepaintMs = 1100;
 
+    // m_switchArmed's two sentinels. An outfit plate arms as its own row index.
+    static constexpr int kNothingArmed = -2;
+    static constexpr int kDefaultPlate = -1;
+
     P3DUI::Interface001* m_api = nullptr;
     P3DUI::Root* m_root = nullptr;
     P3DUI::Container* m_itemSpiral = nullptr;
@@ -1977,6 +2081,11 @@ private:
     // persisted - it is a property of this row being open.
     bool m_outfitRowVisible = false;
     bool m_outfitDeleteArmed = false;
+
+    // Which plate is one press away from discarding an unsaved look: the index of an outfit
+    // plate, kDefaultPlate for NPC Default, kNothingArmed for none. Only ever set while the
+    // NPC is wearing something no saved outfit holds - see NeedsSwitchConfirmation.
+    int m_switchArmed = kNothingArmed;
     std::optional<std::uint32_t> m_editingSlot;
     std::vector<OutfitSlotManager::Slot> m_outfitSlotList;
     std::vector<P3DUI::Element*> m_outfitElements;
@@ -2008,6 +2117,21 @@ private:
     // Whether a repaint is already queued for this drain. Written from the equip event on
     // the game thread and cleared by the task it guards.
     std::atomic<bool> m_highlightRepaintQueued{false};
+
+    // Guards every vector of live P3DUI elements above, and the lists they run parallel to.
+    //
+    // The rows are built from 3DUI's main-loop hook, but two things repaint them from an
+    // SKSE task - the coalesced worn-state repaint and the settle repaint - and the SKSE
+    // task queue is not drained on that thread. Without this a repaint could be halfway
+    // through the wheel when a rebuild destroyed the elements underneath it, and call a
+    // virtual on freed memory; that is the crash of 2026-08-20.
+    //
+    // Recursive because the rebuilds nest: RefreshItemSpiral hands off to
+    // RefreshItemSpiralWithGalleryArmor, and RefreshOutfitRow ends by calling
+    // RefreshOutfitHighlight. A rebuild holds it for as long as it takes to load its
+    // meshes, which is the point - a repaint that has to wait for that is a repaint that
+    // was going to be wrong anyway.
+    mutable std::recursive_mutex m_elementsMutex;
 
     std::vector<ModCategoryInfo> m_categoryList;         // Mods currently in the gallery row
     std::vector<KeywordCategoryInfo> m_keywordCategoryList;  // Keyword categories currently in the gallery row

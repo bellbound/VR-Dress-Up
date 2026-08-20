@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 // The saved looks of an NPC, and which of them they have on.
@@ -79,11 +80,25 @@ public:
     // head, then the other armour slots, then whatever is left. Null for an empty outfit.
     RE::TESObjectARMO* Representative(RE::Actor* actor, std::uint32_t id) const;
 
+    // The same, for a whole row at once, and the version the menu uses. Picking each plate
+    // in isolation gave outfits that share a cuirass the same picture; this one keeps a
+    // plate off a mesh an earlier plate already took whenever the outfit has an
+    // alternative. Index-aligned with `slots`; a null entry is an empty outfit.
+    std::vector<RE::TESObjectARMO*> Representatives(RE::Actor* actor, const std::vector<Slot>& slots) const;
+
 private:
     OutfitSlotManager() = default;
     ~OutfitSlotManager() = default;
     OutfitSlotManager(const OutfitSlotManager&) = delete;
     OutfitSlotManager& operator=(const OutfitSlotManager&) = delete;
+
+    // Every armour in a stored slot that still resolves.
+    std::vector<RE::TESObjectARMO*> Pieces(RE::Actor* actor, std::uint32_t id) const;
+
+    // The most telling piece of `pieces` whose mesh is not in `avoid` (lowercased model
+    // paths). Null when every piece is spoken for.
+    static RE::TESObjectARMO* PickPiece(const std::vector<RE::TESObjectARMO*>& pieces,
+        const std::unordered_set<std::string>& avoid);
 
     // The weapon half of putting an outfit on: empty the actor's hands and keep them empty,
     // or stop caring what they hold.

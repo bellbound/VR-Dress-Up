@@ -27,6 +27,15 @@ struct KeywordCategoryDef
     std::vector<std::string> excludeLongPhrases;
     std::vector<std::string> excludePrefixes;
 
+    // Every item from these plugins joins the category whatever its name says. Lowercased
+    // filenames, e.g. "ks hairdo's.esp". The keyword lists above are ignored for them -
+    // only allFromEspExclude* can keep one out, which is why it is a separate list from
+    // the exclude* above.
+    std::vector<std::string> allFromEsp;
+    std::vector<std::string> allFromEspExcludePhrases;
+    std::vector<std::string> allFromEspExcludeLongPhrases;
+    std::vector<std::string> allFromEspExcludePrefixes;
+
     std::uint32_t requireSlots = 0;             // 0 = no constraint, else item must use one of these biped slots
     std::uint32_t excludeSlots = 0;
 };
@@ -125,6 +134,9 @@ private:
     std::vector<PatternEntry> m_prefixEntries;
     std::vector<PatternEntry> m_longPhraseEntries;
 
+    // Lowercased plugin filename -> categories that take everything from it.
+    std::unordered_map<std::string, std::vector<std::uint16_t>> m_espIndex;
+
     std::vector<Bucket> m_buckets;
 
     // Matching pass state
@@ -137,6 +149,7 @@ private:
     std::vector<std::string> m_tokens;
     std::vector<std::uint8_t> m_hit;
     std::vector<std::uint8_t> m_veto;
+    std::vector<std::uint8_t> m_espHit;
 
     mutable std::mutex m_mutex;
 };
