@@ -76,7 +76,7 @@ public:
         m_onWornStateChanged = std::move(callback);
     }
 
-    // Process equip events - return transferred items to player when NPC unequips them
+    // Process equip events - the wheel repaints from them
     RE::BSEventNotifyControl ProcessEvent(
         const RE::TESEquipEvent* a_event,
         RE::BSTEventSource<RE::TESEquipEvent>*) override
@@ -93,40 +93,14 @@ public:
         // still on, and left its plate reading "worn" until the next click happened to
         // repaint it.
         //
-        // Said ahead of every filter below because those exist for the ghost-item
-        // bookkeeping. Equips are none of its business but they are the wheel's, and an
-        // outfit reapply's unequips are real changes to the plates even when they are ours.
+        // A handed-over piece the NPC takes off stays with the NPC. It used to go back to
+        // the player from here, but an outfit switch takes pieces off too, and the outfit
+        // that went back on then conjured a second copy of the one the player had been
+        // handed back.
         if (const auto* changed = a_event->actor.get(); IsShownActor(changed)) {
             if (m_onWornStateChanged) {
                 m_onWornStateChanged();
             }
-        }
-
-        if (m_processingReturn || a_event->equipped) {
-            return RE::BSEventNotifyControl::kContinue;
-        }
-
-        // An outfit assignment makes the engine queue an UnequipAll. Those unequips are
-        // ours, not the NPC shedding gear, and acting on them would hand the player's
-        // items back mid-dress.
-        if (OutfitFormBackend::GetSingleton()->IsApplying()) {
-            return RE::BSEventNotifyControl::kContinue;
-        }
-
-        if (!m_targetActor || !m_targetIsPlayer) {
-            return RE::BSEventNotifyControl::kContinue;
-        }
-
-        auto* actor = a_event->actor.get();
-        if (!actor || actor->GetFormID() != m_targetActor->GetFormID()) {
-            return RE::BSEventNotifyControl::kContinue;
-        }
-
-        // Check if this was a transferred item and return it to player
-        if (m_transaction.RemoveFromTransferTracking(a_event->baseObject)) {
-            m_processingReturn = true;
-            ReturnItemToPlayer(a_event->baseObject);
-            m_processingReturn = false;
         }
 
         return RE::BSEventNotifyControl::kContinue;
@@ -147,8 +121,6 @@ public:
         // locked outfit back first, so the player edits what they locked. No-op for an
         // unlocked actor, or one already wearing the locked set.
         OutfitLockManager::GetSingleton()->ReconcileBeforeUserEdit(actor);
-
-        m_transaction.CapturePlayerEquipment();
     }
 
     RE::Actor* GetTargetActor() const { return m_targetActor; }
@@ -630,11 +602,8 @@ private:
         }
 
         // Unequip what NPC is wearing in this slot
-        auto* wornArmor = ItemEquipHelper::GetWornInSlot(m_targetActor, armor);
-        if (wornArmor && ClearSlotFor(wornArmor)) {
-            if (!m_transaction.IsTransferredItem(wornArmor->GetFormID())) {
-                m_transaction.TrackUnequip(wornArmor);
-            }
+        if (auto* wornArmor = ItemEquipHelper::GetWornInSlot(m_targetActor, armor)) {
+            ClearSlotFor(wornArmor);
         }
 
         // Transfer and equip
@@ -661,11 +630,7 @@ private:
         }
 
         // Unequip NPC's current weapons in both hands
-        auto equippedWeapons = ItemEquipHelper::GetEquippedWeapons(m_targetActor);
-        for (auto* currentWeapon : equippedWeapons) {
-            if (!m_transaction.IsTransferredItem(currentWeapon->GetFormID())) {
-                m_transaction.TrackUnequip(currentWeapon);
-            }
+        for (auto* currentWeapon : ItemEquipHelper::GetEquippedWeapons(m_targetActor)) {
             ItemEquipHelper::UnequipItem(m_targetActor, currentWeapon);
         }
 
@@ -680,21 +645,6 @@ private:
         spdlog::info("InventoryManager::EquipFromPlayer - Transferred and equipped '{}' on {}",
             weapon->GetFullName(), m_targetActor->GetName());
         return true;
-    }
-
-    // Return an item from NPC back to player (called from equip event)
-    void ReturnItemToPlayer(RE::FormID formID)
-    {
-        auto* player = RE::PlayerCharacter::GetSingleton();
-        if (!player || !m_targetActor) return;
-
-        auto* form = RE::TESForm::LookupByID(formID);
-        if (!form) return;
-
-        m_targetActor->RemoveItem(form->As<RE::TESBoundObject>(), 1,
-            RE::ITEM_REMOVE_REASON::kRemove, nullptr, player);
-
-        spdlog::debug("InventoryManager::ReturnItemToPlayer - Returned item 0x{:08X} to player", formID);
     }
 
     // Reverse a transfer - unequip from NPC and return to player (called when clicking ghost item)
@@ -731,7 +681,6 @@ private:
     InventoryFilterMode m_filterMode = InventoryFilterMode::Armor;
     DressupTransaction m_transaction;
     bool m_initialized = false;
-    bool m_processingReturn = false;
 
     // Set once, by the menu, and read from the equip event on the game thread.
     WornStateChangedCallback m_onWornStateChanged;
