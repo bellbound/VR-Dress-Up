@@ -925,10 +925,7 @@ private:
 
         if (visible) {
             m_editingSlot = OutfitSlotManager::GetSingleton()->Worn(GetCurrentTargetActor());
-            if (m_outfitRow) {
-                m_outfitRow->SetVisible(true);
-            }
-            RefreshOutfitRow();
+            RefreshOutfitRow();  // shows the row once it is full
         } else {
             m_editingSlot.reset();
             ForgetOutfitRowElements();
@@ -962,6 +959,10 @@ private:
     {
         if (!IsMenuOpen() || !m_outfitRow || !m_api || !m_outfitRowVisible) return;
 
+        // Filled hidden and shown at the end. An element created into a visible container
+        // spawns at the container's centre and flies out to its slot; created into a hidden
+        // one it skips the spawn and is simply there when the row appears.
+        m_outfitRow->SetVisible(false);
         m_outfitRow->Clear();
         ForgetOutfitRowElements();
 
@@ -1058,6 +1059,7 @@ private:
 
         RefreshOutfitHighlight();
         m_outfitRow->ResetScroll();
+        m_outfitRow->SetVisible(true);
 
         spdlog::debug("DressupMenuManager::RefreshOutfitRow - {} saved outfit(s), {} on",
             m_outfitSlotList.size(), worn ? std::to_string(*worn) : "none");
