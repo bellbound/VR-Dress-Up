@@ -12,7 +12,7 @@ Whatever you put on them stays on them.[/b][/quote]
 [size=4]Grab any NPC and press the trigger. The wheel appears showing everything they have on - press the trigger on a piece to take it off. Let go of the trigger and the menu anchors in place, so you can browse with both hands free.[/size]
 
 [color=#ffe599][size=4][b]◈ Give Them Your Gear[/b][/size][/color]
-[size=4]Toggle to your own inventory and the wheel fills with your armour and weapons. Press one and they put it on. A button appears to take everything back when you are done.[/size]
+[size=4]Toggle to your own inventory and the wheel fills with your armour and weapons. Press one and they put it on; press it again in your wheel to take it back.[/size]
 
 [color=#ffe599][size=4][b]◈ Browse Every Armour Mod You Own[/b][/size][/color]
 [size=4]The Gallery lists every mod in your load order that adds armour. Pick one and its whole wardrobe fills the wheel - no crafting, no console, no additem. Try things on, take them straight back off.[/size]
@@ -23,14 +23,17 @@ Whatever you put on them stays on them.[/b][/quote]
 [spoiler][center][size=4][img]https://raw.githubusercontent.com/bellbound/VR-Dress-Up/refs/heads/master/assets/demo/demo-cat.webp[/img][/size][/center]
 [size=4]The categories are plain JSON files in [i]Data\SKSE\Plugins\VRDressup\Categories[/i]. Retune the ones that ship with the mod, or drop in your own.[/size][/spoiler]
 
-[color=#ffe599][size=4][b]◈ Lock The Look In[/b][/size][/color]
-[size=4]Press the lock and that outfit is theirs. It survives location changes, saves and reloads - and it survives other mods: if something strips a locked NPC where they stand, they are dressed again a moment later. Unlock and their original outfit comes back.[/size]
+[color=#ffe599][size=4][b]◈ It Stays On[/b][/size][/color]
+[size=4]Whatever you put on an NPC is theirs. It survives location changes, saves and reloads - and it survives other mods: if something strips them where they stand, they are dressed again a moment later.[/size]
+
+[color=#ffe599][size=4][b]◈ Save Outfits[/b][/size][/color]
+[size=4]Press Outfits and a row of the NPC's saved looks opens under the tools. Save the one they have on, dress them up again, save that too - as many as you like per NPC - and switch between them with one press, empty hands included. While the row is open, "Editing Outfit 2" tells you that what you change goes into that outfit; close the row and the look stays but the outfit is left alone. NPC Default hands them back to whatever dressed them before.[/size]
 
 [color=#ffe599][size=4][b]◈ Undress And Re-dress[/b][/size][/color]
 [size=4]One button cycles armour off, everything off, and dressed again. It follows the inventory toggle, so it works on you as well - your own gear off and back on without a trip through the pause menu.[/size]
 
 [color=#ffe599][size=4][b]◈ It Plays Fair With Other Mods[/b][/size][/color]
-[size=4]Locking hands the outfit over to SPID properly, so SPID stops re-dressing that NPC instead of fighting you over them. SeverActions is told to leave locked NPCs alone for as long as the lock holds. And if some other mod turns out to be re-dressing an NPC as fast as this one does, DressUp notices the tug-of-war, stands down on its own and writes the reason to the log, rather than trading equips with it forever.[/size]
+[size=4]Dressing an NPC hands the outfit over to SPID properly, so SPID stops re-dressing that NPC instead of fighting you over them. SeverActions is told to leave them alone for as long as DressUp holds their look. And if some other mod turns out to be re-dressing an NPC as fast as this one does, DressUp notices the tug-of-war, stands down on its own and writes the reason to the log, rather than trading equips with it forever.[/size]
 
 
 [center][color=#ffd966][size=5][b]REQUIREMENTS[/b][/size][/color][/center]
@@ -59,11 +62,11 @@ Whatever you put on them stays on them.[/b][/quote]
 [b]bEnableModGallery[/b] - the row with one entry per installed mod.
 [b]bEnableCategoryGallery[/b] - the row with one entry per item category. Both rows share the same armour scan, and neither runs until you press its button.
 
-[b]bUseOutfitBackend[/b] - assign a real Outfit form when an NPC is locked. This is what makes SPID stand down. Turn it off for plain equip-only locking.
+[b]bUseOutfitBackend[/b] - assign a real Outfit form when DressUp takes over an NPC's look. This is what makes SPID stand down. Turn it off for plain equip-only enforcement.
 [b]bOutfitBackendUniqueOnly[/b] - skip NPCs whose base record is shared between copies, so dressing one generic bandit doesn't dress every bandit.
-[b]bSeverActionsCompat[/b] - take locked NPCs out of SeverActions' outfit system while the lock holds.
+[b]bSeverActionsCompat[/b] - take NPCs DressUp dresses out of SeverActions' outfit system for as long as it holds their look.
 
-[b]bReapplyOnExternalChange[/b] - put a locked outfit back whenever something else changes it, rather than only on a location change or a load.
+[b]bReapplyOnExternalChange[/b] - put an NPC's look back whenever something else changes it, rather than only on a location change or a load.
 [b]iReapplyDelayMs[/b] - how long to wait first, so one outfit swap collapses into one reapply instead of a dozen.
 [b]iReapplyBurstAllowance[/b] and [b]iReapplySustainedIntervalSec[/b] - how many reapplies may happen back-to-back, and the sustained rate that matters after that.
 [b]iReapplyBackoffSec[/b] - how long to stand down once a tug-of-war is detected.
@@ -77,10 +80,7 @@ Whatever you put on them stays on them.[/b][/quote]
 [center][color=#ffd966][size=5][b]F.A.Q[/b][/size][/color][/center]
 
 [color=#ffe599][size=4][b]The NPC I dressed went back to their old outfit.[/b][/size][/color]
-[size=4]Lock them. Without the lock, the game and other mods are free to re-dress them at the next opportunity.[/size]
-
-[color=#ffe599][size=4][b]I locked them and they still changed back.[/b][/size][/color]
-[size=4]Check the log for OUTFIT TUG-OF-WAR - it names the NPC. That means another mod is re-dressing them as fast as DressUp is, and DressUp has stood down rather than fight it. Otherwise, make sure bUseOutfitBackend is on.[/size]
+[size=4]Check the log for OUTFIT TUG-OF-WAR - it names the NPC. That means another mod is re-dressing them as fast as DressUp is, and DressUp has stood down rather than fight it. Otherwise, make sure bUseOutfitBackend is on. Picking NPC Default in the Outfits row is the one thing that hands them back on purpose.[/size]
 
 [color=#ffe599][size=4][b]I dressed one bandit and nothing stuck.[/b][/size][/color]
 [size=4]Outfits are stored on the base NPC record, and generic NPCs share theirs between copies. By default those are skipped, so you don't dress a whole camp at once. Set bOutfitBackendUniqueOnly=0 if that is what you actually want.[/size]

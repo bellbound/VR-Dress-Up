@@ -1,7 +1,7 @@
 What can I use this for?
  ✦ Quickly change what any NPC is wearing without opening menus or breaking immersion
  ✦ Browse armor from all your installed mods and try them on NPCs
- ✦ Lock outfits so NPCs keep wearing what you gave them, even when they change locations
+ ✦ Save outfits per NPC and switch between them; what you put on them stays on, even when they change locations
 
 How it Works
 
@@ -15,11 +15,12 @@ Core Features
   ✦ Gallery mode lets you browse armor from every mod you have installed
   ✦ Category mode gathers every mod's boots, wigs, capes and more into one row
   ✦ Categories are plain JSON files, so you can retune them or add your own
-  ✦ Lock outfits so NPCs maintain their look across location changes and saves
-  ✦ Locked NPCs are re-dressed automatically if another mod undresses them, and DressUp
+  ✦ Save several outfits per NPC - empty hands included - and switch between them with one press
+  ✦ Whatever you put on an NPC stays on across location changes and saves
+  ✦ Dressed NPCs are re-dressed automatically if another mod undresses them, and DressUp
     stands down on its own if that other mod turns out to be fighting back
   ✦ Quick undress button with partial and full options
-  ✦ Restore original outfit at any time
+  ✦ NPC Default hands them back to the game's own outfit at any time
 
 Requirements
 HIGGS
