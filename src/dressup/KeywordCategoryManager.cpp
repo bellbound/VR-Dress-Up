@@ -367,7 +367,7 @@ void KeywordCategoryManager::BeginMatching()
         m_progressFraction = 0.0f;
         m_state = KeywordBuildState::Matching;
 
-        spdlog::info("KeywordCategoryManager: matching {} armor items against {} categories",
+        spdlog::debug("KeywordCategoryManager: matching {} armor items against {} categories",
             m_pendingArmor.size(), m_defs.size());
     }
 

@@ -261,7 +261,7 @@ public:
                 if (DeviceCompat::Unequip(actor, armor)) {
                     ItemEquipHelper::NotePendingUnequip(actor, armor);
                 } else {
-                    spdlog::info("  - '{}' stays on: Devious Devices will not release it",
+                    spdlog::debug("  - '{}' stays on: Devious Devices will not release it",
                         armor->GetFullName());
                 }
                 continue;
@@ -301,7 +301,7 @@ public:
         if (outfitMgr->HasOutfit(actor, kPreUndressOutfitName)) {
             outfitMgr->ApplyOutfit(actor, kPreUndressOutfitName, true);  // unequipOthers=true
             outfitMgr->DeleteOutfit(actor, kPreUndressOutfitName);
-            spdlog::info("  - Restored pre-undress outfit");
+            spdlog::debug("  - Restored pre-undress outfit");
         } else {
             spdlog::warn("  - No pre-undress outfit found");
         }

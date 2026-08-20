@@ -188,7 +188,7 @@ namespace DeviceCompat
         const bool ok = PapyrusBridge::CallMethod(quest, RE::FormType::Quest,
             kLibsScript, "LockDevice", args);
 
-        spdlog::info("DeviceCompat::Equip - {} zadlibs.LockDevice('{}') for '{}'",
+        spdlog::debug("DeviceCompat::Equip - {} zadlibs.LockDevice('{}') for '{}'",
             ok ? "Dispatched" : "Failed to dispatch", inventoryDevice->GetFullName(), actor->GetName());
         return ok;
     }
@@ -199,7 +199,7 @@ namespace DeviceCompat
         if (!IsInventoryDevice(inventoryDevice)) return false;
 
         if (IsQuestDevice(inventoryDevice)) {
-            spdlog::info("DeviceCompat::Unequip - '{}' on '{}' is a quest device; leaving it locked on",
+            spdlog::debug("DeviceCompat::Unequip - '{}' on '{}' is a quest device; leaving it locked on",
                 inventoryDevice->GetFullName(), actor->GetName());
             return false;
         }
@@ -230,7 +230,7 @@ namespace DeviceCompat
         const bool ok = PapyrusBridge::CallMethod(quest, RE::FormType::Quest,
             kLibsScript, "UnlockDevice", args);
 
-        spdlog::info("DeviceCompat::Unequip - {} zadlibs.UnlockDevice('{}') for '{}'",
+        spdlog::debug("DeviceCompat::Unequip - {} zadlibs.UnlockDevice('{}') for '{}'",
             ok ? "Dispatched" : "Failed to dispatch", inventoryDevice->GetFullName(), actor->GetName());
         return ok;
     }

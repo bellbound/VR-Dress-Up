@@ -137,7 +137,7 @@ public:
     void SetTargetActor(RE::Actor* actor)
     {
         m_targetActor = actor;
-        spdlog::info("InventoryManager::SetTargetActor - Set target to: {}",
+        spdlog::debug("InventoryManager::SetTargetActor - Set target to: {}",
             actor ? actor->GetName() : "null");
 
         // Before the spiral is built, not after: if something else has dressed this NPC
@@ -182,7 +182,7 @@ public:
             m_transaction.ClearTransferTracking();
         }
         m_targetIsPlayer = isPlayer;
-        spdlog::info("InventoryManager::SetTargetIsPlayer - Target is player: {}", isPlayer);
+        spdlog::debug("InventoryManager::SetTargetIsPlayer - Target is player: {}", isPlayer);
     }
 
     bool IsTargetPlayer() const { return m_targetIsPlayer; }
@@ -697,7 +697,7 @@ private:
         m_targetActor->RemoveItem(form->As<RE::TESBoundObject>(), 1,
             RE::ITEM_REMOVE_REASON::kRemove, nullptr, player);
 
-        spdlog::info("InventoryManager::ReturnItemToPlayer - Returned item 0x{:08X} to player", formID);
+        spdlog::debug("InventoryManager::ReturnItemToPlayer - Returned item 0x{:08X} to player", formID);
     }
 
     // Reverse a transfer - unequip from NPC and return to player (called when clicking ghost item)

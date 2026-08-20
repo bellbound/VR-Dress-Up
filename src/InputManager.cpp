@@ -60,7 +60,7 @@ InputManager::CallbackId InputManager::AddVrButtonCallback(uint64_t buttonMask, 
 {
 	CallbackId id = m_nextCallbackId++;
 	m_callbacks.push_back({id, buttonMask, std::move(callback)});
-	spdlog::info("Added VR button callback {} for mask 0x{:X}", id, buttonMask);
+	spdlog::debug("Added VR button callback {} for mask 0x{:X}", id, buttonMask);
 	return id;
 }
 
@@ -74,7 +74,7 @@ void InputManager::RemoveVrButtonCallback(CallbackId id)
 		[id](const ButtonCallbackEntry& entry) { return entry.id == id; });
 
 	if (it != m_callbacks.end()) {
-		spdlog::info("Removed VR button callback {} for mask 0x{:X}", id, it->buttonMask);
+		spdlog::debug("Removed VR button callback {} for mask 0x{:X}", id, it->buttonMask);
 		m_callbacks.erase(it);
 	}
 }
@@ -152,9 +152,10 @@ bool InputManager::OnControllerStateChanged(
 	uint64_t currentButtons = pControllerState->ulButtonPressed;
 	uint64_t lastButtons = s_lastButtonState[handIndex];
 
-	// Debug: log full state when it changes
+	// Controller state arrives every frame, so this and the two press/release lines below
+	// are the single largest thing the mod can write. Trace only.
 	if (currentButtons != lastButtons) {
-		spdlog::info("[{}] State change: 0x{:X} -> 0x{:X}", isLeft ? "Left" : "Right", lastButtons, currentButtons);
+		spdlog::trace("[{}] State change: 0x{:X} -> 0x{:X}", isLeft ? "Left" : "Right", lastButtons, currentButtons);
 	}
 
 	// Detect newly pressed buttons (bits that are now 1 but were 0)
@@ -163,13 +164,13 @@ bool InputManager::OnControllerStateChanged(
 	uint64_t newlyReleased = lastButtons & ~currentButtons;
 
 	if (newlyPressed) {
-		spdlog::info("[{}] Button PRESSED: {} (mask: 0x{:X})", isLeft ? "Left" : "Right", GetButtonName(newlyPressed), newlyPressed);
+		spdlog::trace("[{}] Button PRESSED: {} (mask: 0x{:X})", isLeft ? "Left" : "Right", GetButtonName(newlyPressed), newlyPressed);
 		uint64_t blocked = instance->InvokeCallbacks(isLeft, false, newlyPressed);
 		s_blockedHeldButtons[handIndex] |= blocked;  // Remember blocked buttons while held
 	}
 
 	if (newlyReleased) {
-		spdlog::info("[{}] Button RELEASED: {} (mask: 0x{:X})", isLeft ? "Left" : "Right", GetButtonName(newlyReleased), newlyReleased);
+		spdlog::trace("[{}] Button RELEASED: {} (mask: 0x{:X})", isLeft ? "Left" : "Right", GetButtonName(newlyReleased), newlyReleased);
 		instance->InvokeCallbacks(isLeft, true, newlyReleased);
 		s_blockedHeldButtons[handIndex] &= ~newlyReleased;  // Stop blocking on release
 	}

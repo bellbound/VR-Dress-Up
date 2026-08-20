@@ -37,7 +37,7 @@ public:
         // Add to front
         m_frontMods.insert(m_frontMods.begin(), modName);
 
-        spdlog::info("GalleryStateManager: Pushed '{}' to front (total front mods: {})",
+        spdlog::debug("GalleryStateManager: Pushed '{}' to front (total front mods: {})",
             modName, m_frontMods.size());
     }
 

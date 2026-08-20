@@ -59,12 +59,17 @@ namespace MenuChecker
 
         std::string menuName = a_event->menuName.c_str();
 
+        // Only the game-stopping set changes what this mod does, and the rest are not
+        // worth writing: WSActivateRollover alone opens and closes thousands of times an
+        // hour as the crosshair passes over things, which used to be 90% of the log.
+        const bool worthLogging = gameStoppingMenus.contains(menuName);
+
         if (a_event->opening) {
             openMenus.insert(menuName);
-            spdlog::trace("MenuChecker: Menu opened - {}", menuName);
+            if (worthLogging) spdlog::trace("MenuChecker: Menu opened - {}", menuName);
         } else {
             openMenus.erase(menuName);
-            spdlog::trace("MenuChecker: Menu closed - {}", menuName);
+            if (worthLogging) spdlog::trace("MenuChecker: Menu closed - {}", menuName);
         }
 
         return RE::BSEventNotifyControl::kContinue;

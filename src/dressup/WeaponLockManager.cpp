@@ -228,7 +228,7 @@ void WeaponLockManager::Sweep()
     }
 
     if (!scheduled.empty()) {
-        spdlog::info("WeaponLockManager::Sweep - Looking at {} NPC(s)", scheduled.size());
+        spdlog::debug("WeaponLockManager::Sweep - Looking at {} NPC(s)", scheduled.size());
     }
 }
 
@@ -345,7 +345,7 @@ void WeaponLockManager::RunCheck(RE::FormID actorID, std::uint64_t watch)
 
     for (auto* weapon : weapons) {
         ItemEquipHelper::UnequipItem(actor, weapon);
-        spdlog::info("WeaponLockManager - Took '{}' off '{}' (0x{:08X})",
+        spdlog::debug("WeaponLockManager - Took '{}' off '{}' (0x{:08X})",
             weapon->GetFullName(), actor->GetName(), actorID);
     }
 
@@ -439,7 +439,7 @@ void WeaponLockManager::OnPreLoad()
     mgr->m_watched.clear();
     mgr->RecountLocked();
 
-    spdlog::info("WeaponLockManager::OnPreLoad - Cleared state");
+    spdlog::debug("WeaponLockManager::OnPreLoad - Cleared state");
 }
 
 void WeaponLockManager::OnLoadRecord(SKSE::SerializationInterface* a_intfc,

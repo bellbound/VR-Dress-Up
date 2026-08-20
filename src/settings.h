@@ -25,7 +25,19 @@ public:
         std::string dataPath = exePath.substr(0, exePath.rfind('\\')) + "\\Data\\SKSE\\Plugins\\DressUpVR.ini";
         m_iniPath = dataPath;
 
+        // [Debug] section - read first so everything below is written at the chosen level
+        m_logLevel = ReadString("Debug", "sLogLevel", "info");
+        const auto level = ParseLogLevel(m_logLevel);
+        SetLogLevel(level);
+
         spdlog::info("Settings: Loading from '{}'", m_iniPath);
+        spdlog::info("Settings: sLogLevel = {}", m_logLevel);
+        // A misspelt level would otherwise look like it took effect, and the report that
+        // came back would quietly be at the wrong level.
+        if (!IsKnownLogLevel(m_logLevel)) {
+            spdlog::warn("Settings: sLogLevel = '{}' is not one of trace/debug/info/warn/"
+                "error/off, using info", m_logLevel);
+        }
 
         // [General] section
         m_enableModGallery = GetPrivateProfileIntA("General", "bEnableModGallery", 0, m_iniPath.c_str()) != 0;
@@ -90,7 +102,17 @@ private:
         return clamped;
     }
 
+    std::string ReadString(const char* section, const char* key, const char* fallback) const
+    {
+        char buffer[64]{};
+        GetPrivateProfileStringA(section, key, fallback, buffer, sizeof(buffer), m_iniPath.c_str());
+        return buffer;
+    }
+
     std::string m_iniPath;
+
+    // [Debug]
+    std::string m_logLevel = "info";  // trace | debug | info | warn | error | off
 
     // [General]
     bool m_enableModGallery = false;      // Default: disabled

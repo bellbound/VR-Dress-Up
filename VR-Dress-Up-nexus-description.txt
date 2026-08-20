@@ -66,7 +66,9 @@ Whatever you put on them stays on them.[/b][/quote]
 [b]bReapplyOnExternalChange[/b] - put a locked outfit back whenever something else changes it, rather than only on a location change or a load.
 [b]iReapplyDelayMs[/b] - how long to wait first, so one outfit swap collapses into one reapply instead of a dozen.
 [b]iReapplyBurstAllowance[/b] and [b]iReapplySustainedIntervalSec[/b] - how many reapplies may happen back-to-back, and the sustained rate that matters after that.
-[b]iReapplyBackoffSec[/b] - how long to stand down once a tug-of-war is detected.[/size][/spoiler]
+[b]iReapplyBackoffSec[/b] - how long to stand down once a tug-of-war is detected.
+
+[b]sLogLevel[/b] - how much goes into [i]Documents\My Games\Skyrim VR\SKSE\DressUpVR.log[/i]: [i]error[/i], [i]warn[/i], [i]info[/i] (default), [i]debug[/i], [i]trace[/i] or [i]off[/i]. The default records every decision the mod makes about an NPC and is what to send with a bug report. Raise it to [i]debug[/i] for one line per item, or [i]trace[/i] for controller input as well - trace grows very quickly and is only worth it for input problems.[/size][/spoiler]
 
 [color=#ffe599][size=4][b]For Mod Authors[/b][/size][/color]
 [spoiler][size=4]DressUpVR.dll exports an SKSE plugin interface for reading and writing outfits on an actor: enumerate the outfits stored for an actor, read their contents, and inject an outfit back. It all speaks FormKeys rather than runtime form IDs, so an outfit can be read out of one savegame and written into another. The header is [i]src/api/DressUpInterface002.h[/i] in the repo and is meant to be copied into your project.[/size][/spoiler]

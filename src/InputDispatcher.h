@@ -78,7 +78,7 @@ public:
                 [](bool isLeft, bool isReleased, vr::EVRButtonId) -> bool {
                     return InputDispatcher::GetSingleton()->OnTriggerInput(isLeft, isReleased);
                 });
-            spdlog::info("InputDispatcher: Registered trigger callback for menu positioning");
+            spdlog::debug("InputDispatcher: Registered trigger callback for menu positioning");
         }
 
         m_initialized = true;
@@ -130,7 +130,7 @@ private:
         }
 
         // Menu is open and trigger released - end the positioning
-        spdlog::info("InputDispatcher: Trigger released - ending menu positioning");
+        spdlog::debug("InputDispatcher: Trigger released - ending menu positioning");
         menuMgr->OnTriggerRelease();
         return false;  // Don't consume - other systems may need this
     }

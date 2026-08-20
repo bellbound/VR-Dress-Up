@@ -639,7 +639,7 @@ void OutfitLockManager::UnequipArmorExcept(RE::Actor* actor,
             if (DeviceCompat::Unequip(actor, armor)) {
                 ItemEquipHelper::NotePendingUnequip(actor, armor);
             } else {
-                spdlog::info("OutfitLockManager::UnequipArmorExcept - '{}' stays on: Devious "
+                spdlog::debug("OutfitLockManager::UnequipArmorExcept - '{}' stays on: Devious "
                     "Devices will not release it", armor->GetFullName());
             }
             continue;
@@ -740,7 +740,7 @@ bool OutfitLockManager::SaveOutfit(RE::Actor* actor, const std::string& outfitNa
         item.formKey = formKey;
         outfit.items.push_back(item);
 
-        spdlog::info("  - Saved armor '{}' as '{}'",
+        spdlog::debug("  - Saved armor '{}' as '{}'",
             armor->GetFullName(), formKey);
     }
 
@@ -909,7 +909,7 @@ bool OutfitLockManager::UpdateLockedOutfitFromEdit(RE::Actor* actor,
                     return item.formKey == change.formKey;
                 }), items.end());
             if (items.size() != before) {
-                spdlog::info("  - Took '{}' ({}) out of the locked outfit",
+                spdlog::debug("  - Took '{}' ({}) out of the locked outfit",
                     change.name, change.formKey);
             }
         }
@@ -924,7 +924,7 @@ bool OutfitLockManager::UpdateLockedOutfitFromEdit(RE::Actor* actor,
             SavedArmorItem item;
             item.formKey = change.formKey;
             items.push_back(std::move(item));
-            spdlog::info("  - Put '{}' ({}) into the locked outfit",
+            spdlog::debug("  - Put '{}' ({}) into the locked outfit",
                 change.name, change.formKey);
         }
 
@@ -1022,7 +1022,7 @@ bool OutfitLockManager::ApplyOutfit(RE::Actor* actor, const std::string& outfitN
         // so an old save stops re-equipping a TNG addon the player has since removed.
         if (ItemEquipHelper::IsBodyPart(armor)) {
             keysToRemove.push_back(item.formKey);
-            spdlog::info("  - '{}' ({}) is a body part, not clothing - dropping it from the outfit "
+            spdlog::debug("  - '{}' ({}) is a body part, not clothing - dropping it from the outfit "
                 "and leaving it to the mod that manages it", armor->GetFullName(), item.formKey);
             continue;
         }
@@ -1033,7 +1033,7 @@ bool OutfitLockManager::ApplyOutfit(RE::Actor* actor, const std::string& outfitN
         // same outfit is what actually restores the device.
         if (DeviceCompat::IsRenderedDevice(armor)) {
             keysToRemove.push_back(item.formKey);
-            spdlog::info("  - {} is the rendered half of a Devious Device - dropping it from the "
+            spdlog::debug("  - {} is the rendered half of a Devious Device - dropping it from the "
                 "outfit and leaving it to DD", item.formKey);
             continue;
         }
@@ -1051,7 +1051,7 @@ bool OutfitLockManager::ApplyOutfit(RE::Actor* actor, const std::string& outfitN
         }
 
         validArmor.push_back(armor);
-        spdlog::info("  - Equipping '{}' ({})",
+        spdlog::debug("  - Equipping '{}' ({})",
             armor->GetFullName(), item.formKey);
     }
 
@@ -1067,7 +1067,7 @@ bool OutfitLockManager::ApplyOutfit(RE::Actor* actor, const std::string& outfitN
                         return std::find(keysToRemove.begin(), keysToRemove.end(), item.formKey) != keysToRemove.end();
                     }),
                 it->second.items.end());
-            spdlog::info("OutfitLockManager::ApplyOutfit - Removed {} items from outfit",
+            spdlog::debug("OutfitLockManager::ApplyOutfit - Removed {} items from outfit",
                 keysToRemove.size());
         }
     }
@@ -1267,7 +1267,7 @@ void OutfitLockManager::MarkItemAsPlayerGiven(RE::Actor* actor, RE::FormID itemI
     std::lock_guard<std::mutex> lock(m_mutex);
     m_playerGivenItems[actor->GetFormID()].insert(itemID);
 
-    spdlog::info("OutfitLockManager::MarkItemAsPlayerGiven - Marked item 0x{:08X} as player-given for '{}'",
+    spdlog::debug("OutfitLockManager::MarkItemAsPlayerGiven - Marked item 0x{:08X} as player-given for '{}'",
         itemID, actor->GetName());
 }
 
@@ -1312,14 +1312,14 @@ void OutfitLockManager::ReturnPlayerItems(RE::Actor* actor)
         std::lock_guard<std::mutex> lock(m_mutex);
         auto it = m_playerGivenItems.find(actorID);
         if (it == m_playerGivenItems.end() || it->second.empty()) {
-            spdlog::info("OutfitLockManager::ReturnPlayerItems - No player items tracked for '{}'",
+            spdlog::debug("OutfitLockManager::ReturnPlayerItems - No player items tracked for '{}'",
                 actor->GetName());
             return;
         }
         itemsToReturn = it->second;  // Copy to work outside lock
     }
 
-    spdlog::info("OutfitLockManager::ReturnPlayerItems - Checking {} tracked items for '{}'",
+    spdlog::debug("OutfitLockManager::ReturnPlayerItems - Checking {} tracked items for '{}'",
         itemsToReturn.size(), actor->GetName());
 
     std::uint32_t returnedCount = 0;
@@ -1350,7 +1350,7 @@ void OutfitLockManager::ReturnPlayerItems(RE::Actor* actor)
                 // A device has to be unlocked before it can change hands, and DD may say
                 // no. Taking it back anyway would leave the rendered half on the NPC.
                 if (!DeviceCompat::Unequip(actor, armor)) {
-                    spdlog::info("  - Leaving '{}' (0x{:08X}) on '{}': Devious Devices will not "
+                    spdlog::debug("  - Leaving '{}' (0x{:08X}) on '{}': Devious Devices will not "
                         "release it", form->GetName(), itemID, actor->GetName());
                     continue;
                 }
@@ -1362,7 +1362,7 @@ void OutfitLockManager::ReturnPlayerItems(RE::Actor* actor)
         // Transfer to player
         actor->RemoveItem(form->As<RE::TESBoundObject>(), 1, RE::ITEM_REMOVE_REASON::kRemove, nullptr, player);
 
-        spdlog::info("  - Returned '{}' (0x{:08X}) to player", form->GetName(), itemID);
+        spdlog::debug("  - Returned '{}' (0x{:08X}) to player", form->GetName(), itemID);
         returnedItems.push_back(itemID);
         ++returnedCount;
     }
@@ -1398,7 +1398,7 @@ void OutfitLockManager::MarkItemAsGallerySpawned(RE::Actor* actor, RE::FormID it
     m_gallerySpawnedItems[actor->GetFormID()].insert(itemID);
     m_hasGalleryItems.store(true, std::memory_order_relaxed);
 
-    spdlog::info("OutfitLockManager::MarkItemAsGallerySpawned - Marked item 0x{:08X} as gallery-spawned for '{}'",
+    spdlog::debug("OutfitLockManager::MarkItemAsGallerySpawned - Marked item 0x{:08X} as gallery-spawned for '{}'",
         itemID, actor->GetName());
 }
 
@@ -1558,7 +1558,7 @@ void OutfitLockManager::OnGameSave(SKSE::SerializationInterface* a_intfc)
             a_intfc->WriteRecordData(actorFormKey.data(), actorKeyLen);
         }
 
-        spdlog::info("  - Saved outfit '{}' for actor 0x{:08X} ('{}') with {} items",
+        spdlog::debug("  - Saved outfit '{}' for actor 0x{:08X} ('{}') with {} items",
             key.outfitName, key.actorRefID,
             actorFormKey.empty() ? "dynamic/unknown" : actorFormKey, itemCount);
     }
@@ -1586,10 +1586,10 @@ void OutfitLockManager::OnGameSave(SKSE::SerializationInterface* a_intfc)
             a_intfc->WriteRecordData(&itemID, sizeof(itemID));
         }
 
-        spdlog::info("  - Saved {} player items for actor 0x{:08X}", itemCount, actorID);
+        spdlog::debug("  - Saved {} player items for actor 0x{:08X}", itemCount, actorID);
     }
 
-    spdlog::info("OutfitLockManager::OnGameSave - Done");
+    spdlog::debug("OutfitLockManager::OnGameSave - Done");
 }
 
 void OutfitLockManager::OnPreLoad()
@@ -1601,7 +1601,7 @@ void OutfitLockManager::OnPreLoad()
     mgr->m_playerGivenItems.clear();
     mgr->RefreshLockedCount();
 
-    spdlog::info("OutfitLockManager::OnPreLoad - Cleared state");
+    spdlog::debug("OutfitLockManager::OnPreLoad - Cleared state");
 }
 
 void OutfitLockManager::OnLoadRecord(SKSE::SerializationInterface* a_intfc,
@@ -1679,7 +1679,7 @@ void OutfitLockManager::OnLoadRecord(SKSE::SerializationInterface* a_intfc,
                         Persistence::FormKeyUtil::ResolveToRuntimeFormID(outfit.actorFormKey);
                     if (fromKey != 0) {
                         if (skseResolved && fromKey != newActorID) {
-                            spdlog::info(
+                            spdlog::debug(
                                 "  - Actor key '{}' resolves to 0x{:08X}, SKSE said 0x{:08X}; "
                                 "trusting the FormKey",
                                 outfit.actorFormKey, fromKey, newActorID);
@@ -1698,7 +1698,7 @@ void OutfitLockManager::OnLoadRecord(SKSE::SerializationInterface* a_intfc,
                 OutfitKey key{newActorID, outfitName};
                 mgr->m_outfits[key] = std::move(outfit);
 
-                spdlog::info("  - Loaded outfit '{}' for actor 0x{:08X} with {} items",
+                spdlog::debug("  - Loaded outfit '{}' for actor 0x{:08X} with {} items",
                     outfitName, newActorID, validCount);
             }
 
@@ -1748,7 +1748,7 @@ void OutfitLockManager::OnLoadRecord(SKSE::SerializationInterface* a_intfc,
 
                 if (!items.empty()) {
                     mgr->m_playerGivenItems[newActorID] = std::move(items);
-                    spdlog::info("  - Loaded {} player items for actor 0x{:08X}", validCount, newActorID);
+                    spdlog::debug("  - Loaded {} player items for actor 0x{:08X}", validCount, newActorID);
                 }
             }
         }
@@ -1766,7 +1766,7 @@ void OutfitLockManager::OnGameLoad(SKSE::SerializationInterface* a_intfc)
 {
     OnPreLoad();
 
-    spdlog::info("OutfitLockManager::OnGameLoad - Loading data");
+    spdlog::debug("OutfitLockManager::OnGameLoad - Loading data");
 
     std::uint32_t type, version, length;
     while (a_intfc->GetNextRecordInfo(type, version, length)) {
@@ -1832,7 +1832,7 @@ void OutfitLockManager::ApplyLockedOutfitsInLocation(RE::BGSLocation* location)
         locName = location->fullName.c_str();
     }
 
-    spdlog::info("OutfitLockManager::ApplyLockedOutfitsInLocation - Scanning location '{}'", locName);
+    spdlog::debug("OutfitLockManager::ApplyLockedOutfitsInLocation - Scanning location '{}'", locName);
 
     // Collect actors to process while holding the lock
     std::vector<RE::Actor*> actorsToProcess;
@@ -1870,7 +1870,7 @@ void OutfitLockManager::ApplyLockedOutfitsInLocation(RE::BGSLocation* location)
                 continue;
             }
 
-            spdlog::info("  - Found locked actor '{}' in location",
+            spdlog::debug("  - Found locked actor '{}' in location",
                 actor->GetName());
             actorsToProcess.push_back(actor);
         }
@@ -2072,7 +2072,7 @@ std::uint32_t OutfitLockManager::EnsureOutfitItemsInInventory(RE::Actor* actor,
         }
         actor->AddObjectToContainer(armor, nullptr, 1, nullptr);
         ++added;
-        spdlog::info("EnsureOutfitItemsInInventory - added '{}' ({}) to 0x{:08X}",
+        spdlog::debug("EnsureOutfitItemsInInventory - added '{}' ({}) to 0x{:08X}",
             armor->GetFullName(), formKey, actor->GetFormID());
     }
 

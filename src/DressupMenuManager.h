@@ -319,7 +319,7 @@ public:
         if (inputMgr && inputMgr->IsInitialized()) {
             uint64_t triggerMask = vr::ButtonMaskFromId(vr::k_EButton_SteamVR_Trigger);
             if (!inputMgr->IsButtonPressed(triggerMask, m_isLeftHand)) {
-                spdlog::info("DressupMenuManager::ShowDressUpMenu - Trigger already released, ending positioning immediately");
+                spdlog::debug("DressupMenuManager::ShowDressUpMenu - Trigger already released, ending positioning immediately");
                 m_root->EndPositioning();
             }
         }
@@ -617,7 +617,7 @@ private:
             }
         }
 
-        spdlog::info("PopulateHandleRow: isLocked={}, hasPlayerItems={}, galleryMode={}",
+        spdlog::debug("PopulateHandleRow: isLocked={}, hasPlayerItems={}, galleryMode={}",
             isLocked, invMgr->HasPlayerItems(), static_cast<int>(m_galleryMode));
     }
 
@@ -689,7 +689,7 @@ private:
             }
         }
 
-        spdlog::info("DressupMenuManager::RefreshItemSpiral - Refreshed with {} items + anchor handle", m_currentItemList.size());
+        spdlog::debug("DressupMenuManager::RefreshItemSpiral - Refreshed with {} items + anchor handle", m_currentItemList.size());
     }
 
     // Is this wheel entry something the actor whose inventory we are showing has on?
@@ -844,7 +844,7 @@ private:
             }
         }
 
-        spdlog::info("DressupMenuManager::RefreshItemSpiralWithGalleryArmor - Showing {} items from '{}'",
+        spdlog::debug("DressupMenuManager::RefreshItemSpiralWithGalleryArmor - Showing {} items from '{}'",
             m_galleryArmorList.size(),
             m_activeModCategory.empty() ? m_activeKeywordCategory : m_activeModCategory);
     }
@@ -1086,7 +1086,7 @@ private:
             float progress = showingMods
                 ? ArmorModManager::GetSingleton()->GetLoadProgress()
                 : KeywordCategoryManager::GetSingleton()->GetProgress();
-            spdlog::info("DressupMenuManager::RefreshGalleryRow - Showing loading indicator (progress: {:.0f}%)",
+            spdlog::debug("DressupMenuManager::RefreshGalleryRow - Showing loading indicator (progress: {:.0f}%)",
                 progress * 100.0f);
             return;
         }
@@ -1177,7 +1177,7 @@ private:
         }
 
         if (kept.size() != categories.size()) {
-            spdlog::info("DressupMenuManager::NarrowCategoriesToTarget - {} of {} categories have "
+            spdlog::debug("DressupMenuManager::NarrowCategoriesToTarget - {} of {} categories have "
                 "nothing {} can wear",
                 categories.size() - kept.size(), categories.size(), target->GetName());
         }
@@ -1247,7 +1247,7 @@ private:
 
         RefreshCategoryHighlight();
 
-        spdlog::info("DressupMenuManager::PopulateModCategories - Populated with {} mods", m_categoryList.size());
+        spdlog::debug("DressupMenuManager::PopulateModCategories - Populated with {} mods", m_categoryList.size());
     }
 
     // Fill the gallery row with one entry per keyword category
@@ -1292,7 +1292,7 @@ private:
 
         RefreshCategoryHighlight();
 
-        spdlog::info("DressupMenuManager::PopulateKeywordCategories - Populated with {} categories",
+        spdlog::debug("DressupMenuManager::PopulateKeywordCategories - Populated with {} categories",
             m_keywordCategoryList.size());
     }
 
@@ -1397,7 +1397,7 @@ public:
         // End the initial positioning (fixes at current position relative to HMD)
         if (m_root && m_root->IsGrabbing()) {
             m_root->EndPositioning();
-            spdlog::info("DressupMenuManager::OnTriggerRelease - Ended initial positioning");
+            spdlog::debug("DressupMenuManager::OnTriggerRelease - Ended initial positioning");
         }
     }
 

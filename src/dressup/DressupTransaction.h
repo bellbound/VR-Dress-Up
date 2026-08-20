@@ -41,7 +41,7 @@ public:
         }
 
         m_transferredItems.push_back({item, equippedOnNpc});
-        spdlog::info("DressupTransaction::TrackTransfer - Tracking '{}' (equipped={})",
+        spdlog::debug("DressupTransaction::TrackTransfer - Tracking '{}' (equipped={})",
             item->GetName(), equippedOnNpc);
     }
 
@@ -58,7 +58,7 @@ public:
         }
 
         m_unequippedNpcItems.push_back({item});
-        spdlog::info("DressupTransaction::TrackUnequip - Tracking unequipped '{}'",
+        spdlog::debug("DressupTransaction::TrackUnequip - Tracking unequipped '{}'",
             item->GetName());
     }
 
@@ -67,7 +67,7 @@ public:
     {
         for (auto it = m_transferredItems.begin(); it != m_transferredItems.end(); ++it) {
             if (it->item && it->item->GetFormID() == formID) {
-                spdlog::info("DressupTransaction::RemoveFromTransferTracking - Removed '{}'",
+                spdlog::debug("DressupTransaction::RemoveFromTransferTracking - Removed '{}'",
                     it->item->GetName());
                 m_transferredItems.erase(it);
                 return true;
@@ -113,7 +113,7 @@ public:
             auto* armor = player->GetWornArmor(slotMask);
             if (armor && !HasCapturedArmor(armor->GetFormID())) {
                 m_playerEquippedArmor.push_back(armor);
-                spdlog::info("DressupTransaction::CapturePlayerEquipment - Captured armor '{}' in slot {}",
+                spdlog::debug("DressupTransaction::CapturePlayerEquipment - Captured armor '{}' in slot {}",
                     armor->GetFullName(), slot);
             }
         }
@@ -126,7 +126,7 @@ public:
             auto* rightWeapon = rightHand->As<RE::TESObjectWEAP>();
             if (rightWeapon) {
                 m_playerEquippedWeapons.push_back(rightWeapon);
-                spdlog::info("DressupTransaction::CapturePlayerEquipment - Captured weapon '{}' (right hand)",
+                spdlog::debug("DressupTransaction::CapturePlayerEquipment - Captured weapon '{}' (right hand)",
                     rightWeapon->GetFullName());
             }
         }
@@ -136,7 +136,7 @@ public:
             // Only add if different from right hand
             if (leftWeapon && (!rightHand || leftHand->GetFormID() != rightHand->GetFormID())) {
                 m_playerEquippedWeapons.push_back(leftWeapon);
-                spdlog::info("DressupTransaction::CapturePlayerEquipment - Captured weapon '{}' (left hand)",
+                spdlog::debug("DressupTransaction::CapturePlayerEquipment - Captured weapon '{}' (left hand)",
                     leftWeapon->GetFullName());
             }
         }
@@ -175,7 +175,7 @@ public:
             if (auto* armor = transfer.item->As<RE::TESObjectARMO>();
                 armor && DeviceCompat::IsDevice(armor)) {
                 if (!ItemEquipHelper::UnequipArmor(targetActor, armor)) {
-                    spdlog::info("  Left '{}' on the NPC: Devious Devices will not release it",
+                    spdlog::debug("  Left '{}' on the NPC: Devious Devices will not release it",
                         transfer.item->GetName());
                     continue;
                 }
@@ -184,7 +184,7 @@ public:
             }
 
             targetActor->RemoveItem(transfer.item, 1, RE::ITEM_REMOVE_REASON::kRemove, nullptr, player);
-            spdlog::info("  Returned '{}' to player", transfer.item->GetName());
+            spdlog::debug("  Returned '{}' to player", transfer.item->GetName());
         }
 
         // Re-equip NPC's original items that were unequipped (with inventory check)
@@ -207,7 +207,7 @@ public:
             } else {
                 equipManager->EquipObject(targetActor, unequipped.item, nullptr, 1, nullptr, true, false, false);
             }
-            spdlog::info("  Re-equipped '{}' on NPC", unequipped.item->GetName());
+            spdlog::debug("  Re-equipped '{}' on NPC", unequipped.item->GetName());
         }
 
         // Restore player's equipped items
@@ -320,7 +320,7 @@ private:
             });
 
             if (inventory.empty()) {
-                spdlog::info("  Player no longer has armor '{}', skipping", armor->GetFullName());
+                spdlog::debug("  Player no longer has armor '{}', skipping", armor->GetFullName());
                 continue;
             }
 
@@ -334,7 +334,7 @@ private:
             }
 
             equipManager->EquipObject(player, armor, nullptr, 1, nullptr, true, false, false);
-            spdlog::info("  Re-equipped armor '{}' on player", armor->GetFullName());
+            spdlog::debug("  Re-equipped armor '{}' on player", armor->GetFullName());
         }
 
         // Restore weapons
@@ -347,12 +347,12 @@ private:
             });
 
             if (inventory.empty()) {
-                spdlog::info("  Player no longer has weapon '{}', skipping", weapon->GetFullName());
+                spdlog::debug("  Player no longer has weapon '{}', skipping", weapon->GetFullName());
                 continue;
             }
 
             equipManager->EquipObject(player, weapon, nullptr, 1, nullptr, true, false, false);
-            spdlog::info("  Re-equipped weapon '{}' on player", weapon->GetFullName());
+            spdlog::debug("  Re-equipped weapon '{}' on player", weapon->GetFullName());
         }
     }
 

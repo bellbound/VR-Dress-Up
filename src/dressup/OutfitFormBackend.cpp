@@ -411,7 +411,7 @@ void OutfitFormBackend::ReapplyAll()
             continue;  // still assigned, nothing to dispatch
         }
 
-        spdlog::info("  - Re-assigning '{}' to '{}'",
+        spdlog::debug("  - Re-assigning '{}' to '{}'",
             entry.outfit->GetFormEditorID(), entry.actor->GetName());
         DispatchSetOutfit(entry.actor, entry.outfit, true);
     }
@@ -540,7 +540,7 @@ void OutfitFormBackend::OnLoadRecord(SKSE::SerializationInterface* a_intfc,
             std::uint8_t usedExternal = 0;
             a_intfc->ReadRecordData(&usedExternal, sizeof(usedExternal));
             if (usedExternal != 0) {
-                spdlog::info("  - Assignment previously used another mod's outfit record; "
+                spdlog::debug("  - Assignment previously used another mod's outfit record; "
                     "it will be re-assigned one from our own pool");
             }
         }
