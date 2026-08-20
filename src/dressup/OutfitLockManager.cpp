@@ -1146,14 +1146,6 @@ bool OutfitLockManager::Lock(RE::Actor* actor)
         return false;
     }
 
-    // Whatever the last unlock parked is stale now: this lock is snapshotting a look the
-    // player has since put together, and offering to swap it for an older one would undo
-    // the change they just made rather than the unlock.
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_outfits.erase(OutfitKey{actor->GetFormID(), kPreUnlockOutfitName});
-    }
-
     // We defend the look from here on: SeverActions is asked to leave this NPC alone if
     // it is installed, and the outfit record is what makes SPID stand down.
     SeverActionsCompat::TakeOver(actor);
@@ -1162,45 +1154,43 @@ bool OutfitLockManager::Lock(RE::Actor* actor)
     return true;
 }
 
-bool OutfitLockManager::Relock(RE::Actor* actor)
+bool OutfitLockManager::AdoptStoredOutfit(RE::Actor* actor, const std::string& sourceName)
 {
     if (!actor || actor->IsPlayerRef()) {
-        return Lock(actor);
+        return false;
     }
 
-    // Decided under the lock, acted on outside it: Lock and ApplyOutfit both take m_mutex
-    // themselves, and it is not recursive.
-    bool restored = false;
+    // Copied under the lock, applied outside it: ApplyOutfit takes m_mutex itself, and it
+    // is not recursive. The copy has to land *before* the suspension below is constructed,
+    // so that it sees the actor as locked and folds the apply into "locked" on exit.
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        const auto parked = m_outfits.find(OutfitKey{actor->GetFormID(), kPreUnlockOutfitName});
-        if (parked != m_outfits.end()) {
-            // Straight back to being the locked outfit. ApplyOutfit below re-adds anything
-            // the unlock's SetOutfit stripped out of the inventory before it equips.
-            m_outfits[OutfitKey{actor->GetFormID(), "locked"}] = parked->second;
-            m_outfits.erase(parked);
-            RefreshLockedCount();
-            restored = true;
+        const auto source = m_outfits.find(OutfitKey{actor->GetFormID(), sourceName});
+        if (source == m_outfits.end()) {
+            spdlog::warn("OutfitLockManager::AdoptStoredOutfit - No outfit '{}' for '{}'",
+                sourceName, actor->GetName());
+            return false;
         }
+        m_outfits[OutfitKey{actor->GetFormID(), "locked"}] = source->second;
+        RefreshLockedCount();
     }
 
-    if (!restored) {
-        return Lock(actor);
-    }
+    spdlog::info("OutfitLockManager::AdoptStoredOutfit - Putting '{}' into '{}'",
+        actor->GetName(), sourceName);
 
-    spdlog::info("OutfitLockManager::Relock - Putting '{}' back into the outfit their last "
-        "unlock parked", actor->GetName());
-
-    // The user asked for this, so it goes on regardless of what the NPC has been dressed
-    // in since - same bracket as a menu edit, so the watcher does not read our own equips
-    // as somebody else undressing them.
+    // "locked" already is the new set, so the fold on exit is a no-op for everything this
+    // apply changed, and only ever *names* a piece it could not take off - a Devious
+    // Device DD refused to release, say - rather than writing it into the outfit.
+    // ApplyOutfit re-adds anything a previous unlock's SetOutfit stripped out of the
+    // inventory before it equips.
     {
         ScopedLockSuspension suspension(actor);
         ApplyOutfit(actor, "locked", true);
     }
 
+    // The suspension's exit has promoted the look to the outfit record; SeverActions still
+    // has to be told, which is what a fresh Lock does as well.
     SeverActionsCompat::TakeOver(actor);
-    PromoteLockToOutfitForm(actor);
 
     return true;
 }
@@ -1214,22 +1204,6 @@ bool OutfitLockManager::Unlock(RE::Actor* actor)
 
     spdlog::info("OutfitLockManager::Unlock - Unlocking actor '{}' (0x{:08X})",
         actor->GetName(), actor->GetFormID());
-
-    // Park the outfit we were defending before anything else touches it. The restore below
-    // puts the NPC straight back into their original clothes, which is a whole dressing
-    // session thrown away by one click of a toggle; Relock hands it back.
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        const auto locked = m_outfits.find(OutfitKey{actor->GetFormID(), "locked"});
-        if (locked != m_outfits.end() && !locked->second.items.empty()) {
-            m_outfits[OutfitKey{actor->GetFormID(), kPreUnlockOutfitName}] = locked->second;
-            spdlog::info("OutfitLockManager::Unlock - Parked {} item(s) as '{}'; locking '{}' "
-                "again puts them back on", locked->second.items.size(), kPreUnlockOutfitName,
-                actor->GetName());
-        } else {
-            m_outfits.erase(OutfitKey{actor->GetFormID(), kPreUnlockOutfitName});
-        }
-    }
 
     // Give the NPC back to whoever had them: restoring the original outfit is what lets
     // SPID resume distributing to this actor. Restore first, then release - the other way
@@ -1691,6 +1665,14 @@ void OutfitLockManager::OnLoadRecord(SKSE::SerializationInterface* a_intfc,
                 if (newActorID == 0) {
                     spdlog::warn("  - Cannot resolve actor 0x{:08X} ('{}'), dropping outfit '{}'",
                         oldActorID, outfit.actorFormKey, outfitName);
+                    continue;
+                }
+
+                // Where an unlock used to park the outfit it had been defending, for the
+                // lock button to offer back. Neither exists any more; saved outfits took
+                // over that job. Read in full above, dropped here.
+                if (outfitName == "preunlock") {
+                    spdlog::debug("  - Dropping parked pre-unlock outfit for actor 0x{:08X}", newActorID);
                     continue;
                 }
 

@@ -502,21 +502,9 @@ private:
 
         // Lock toggle button - allows manual lock/unlock
         bool isLocked = invMgr->IsNpcLocked();
-        const bool canRestore = !isLocked && targetActor &&
-            OutfitLockManager::GetSingleton()->HasOutfit(
-                targetActor, OutfitLockManager::kPreUnlockOutfitName);
-        // What the click is about to do, not what the icon already shows. "Jora is Locked"
-        // beside a lit padlock was the state twice over and said nothing about the
-        // consequence - and unlocking is the one button in this row that throws a dressing
-        // session away: it deletes the stored outfit, stops defending it, and hands the NPC
-        // back to whatever dresses them normally, which with the outfit backend on means
-        // their own clothes go back on there and then. Worth the warning, and worth saying
-        // in the same breath that the next press undoes it.
         const wchar_t* lockTooltip = isLocked
             ? L"Unlock (drops this outfit)"
-            : canRestore
-                ? L"Relock (outfit back on)"
-                : L"Lock this outfit";
+            : L"Lock this outfit";
         std::string lockIcon = isLocked
             ? "textures\\VRDressup\\lock_highlight.dds"
             : "textures\\VRDressup\\unlock.dds";

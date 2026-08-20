@@ -451,10 +451,7 @@ public:
         if (!m_targetActor) return false;
 
         spdlog::info("InventoryManager::LockNpc - Locking '{}'", m_targetActor->GetName());
-        // Relock rather than Lock: this is the lock button, the one place a lock can be
-        // undoing the unlock that came before it.
-        OutfitLockManager::GetSingleton()->Relock(m_targetActor);
-        return true;
+        return OutfitLockManager::GetSingleton()->Lock(m_targetActor);
     }
 
     // Check if NPC has any items from player
