@@ -69,8 +69,9 @@ public:
     bool IsEligible(RE::Actor* actor) const;
 
     // Give the actor an outfit record and assign it. `formKeys` is the armour set,
-    // normally the freshly-snapshotted "locked" outfit. No-ops when the item set and
-    // the actor's current outfit are both already what we last applied.
+    // normally the freshly-snapshotted "locked" outfit; an empty set means "wear
+    // nothing" and empties the record. No-ops when the item set and the actor's current
+    // outfit are both already what we last applied.
     bool Apply(RE::Actor* actor, const std::vector<std::string>& formKeys);
 
     // Put the actor's original outfit back and release its pool slot, so SPID can

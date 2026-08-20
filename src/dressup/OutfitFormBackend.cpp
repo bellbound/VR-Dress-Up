@@ -257,11 +257,10 @@ bool OutfitFormBackend::Apply(RE::Actor* actor, const std::vector<std::string>& 
 {
     if (!IsAvailable() || !IsEligible(actor)) return false;
 
-    if (formKeys.empty()) {
-        spdlog::info("OutfitFormBackend::Apply - '{}' has an empty outfit, not assigning one",
-            actor->GetName());
-        return false;
-    }
+    // An empty set is a real outfit - "wear nothing" - and goes through like any other.
+    // Returning early here used to leave the record holding whatever the previous set was,
+    // so an NPC undressed to nothing was re-dressed out of their own record on the next
+    // cell reset, and a fresh one was never handed to SPID at all.
 
     const std::string actorKey = Persistence::FormKeyUtil::BuildFormKey(actor);
     if (actorKey.empty()) {
