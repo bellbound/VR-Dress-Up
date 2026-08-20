@@ -978,7 +978,7 @@ private:
             P3DUI::ElementConfig deleteConfig = P3DUI::ElementConfig::Default("outfit_delete");
             deleteConfig.texturePath = m_outfitDeleteArmed
                 ? "textures\\VRDressup\\question.dds"
-                : "textures\\VRDressup\\minus.dds";
+                : "textures\\VRDressup\\trash.dds";
             const std::wstring deleteTooltip = DeleteTooltip(*worn);
             deleteConfig.tooltip = deleteTooltip.c_str();
             deleteConfig.scale = 1.2f;
@@ -1144,7 +1144,7 @@ private:
         m_outfitDeleteArmed = false;
 
         if (m_outfitDeleteButton) {
-            m_outfitDeleteButton->SetTexture("textures\\VRDressup\\minus.dds");
+            m_outfitDeleteButton->SetTexture("textures\\VRDressup\\trash.dds");
             if (const auto worn = HighlightedOutfit()) {
                 m_outfitDeleteButton->SetTooltip(DeleteTooltip(*worn).c_str());
             }
@@ -1282,8 +1282,11 @@ private:
             *worn, npc ? npc->GetName() : "?");
 
         m_outfitDeleteArmed = false;
-        OutfitSlotManager::GetSingleton()->Remove(npc, *worn);
-        m_editingSlot.reset();
+        auto* slots = OutfitSlotManager::GetSingleton();
+        slots->Remove(npc, *worn);
+        // Whatever Remove put them into instead is the outfit being edited now - the same
+        // as if it had been picked - or nothing, if that was the last one.
+        m_editingSlot = slots->Worn(npc);
         AfterOutfitChange();
     }
 

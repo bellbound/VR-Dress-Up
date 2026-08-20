@@ -157,9 +157,26 @@ bool OutfitSlotManager::Remove(RE::Actor* actor, std::uint32_t id)
     }
 
     if (Worn(actor) == id) {
-        // Off the body first. Their own clothes come back; the outfit's pieces stay in the
-        // inventory, the way a deleted outfit was asked to leave them.
-        SelectDefault(actor);
+        // Off the body first, and into another saved look if there is one - the one before
+        // it in the row, else the one after. Only the last outfit hands them back to the
+        // game. Either way the deleted outfit's pieces stay in the inventory.
+        const auto slots = List(actor);
+        std::optional<std::uint32_t> next;
+        for (size_t i = 0; i < slots.size(); ++i) {
+            if (slots[i].id != id) continue;
+            if (i > 0) {
+                next = slots[i - 1].id;
+            } else if (i + 1 < slots.size()) {
+                next = slots[i + 1].id;
+            }
+            break;
+        }
+
+        if (next) {
+            Select(actor, *next);
+        } else {
+            SelectDefault(actor);
+        }
     }
 
     spdlog::info("OutfitSlotManager::Remove - Deleting outfit {} of '{}'", id, actor->GetName());
@@ -197,20 +214,30 @@ RE::TESObjectARMO* OutfitSlotManager::Representative(RE::Actor* actor, std::uint
 {
     if (!actor) return nullptr;
 
-    RE::TESObjectARMO* first = nullptr;
+    std::vector<RE::TESObjectARMO*> pieces;
     for (const auto& key : OutfitLockManager::GetSingleton()->GetOutfitItemFormKeys(actor, NameOf(id))) {
         auto* armor = RE::TESForm::LookupByID<RE::TESObjectARMO>(
             Persistence::FormKeyUtil::ResolveToRuntimeFormID(key));
-        if (!armor) continue;
-
-        using Slot = RE::BGSBipedObjectForm::BipedObjectSlot;
-        if ((static_cast<std::uint32_t>(armor->GetSlotMask()) &
-             static_cast<std::uint32_t>(Slot::kBody)) != 0) {
-            return armor;
-        }
-        if (!first) first = armor;
+        if (armor) pieces.push_back(armor);
     }
-    return first;
+    if (pieces.empty()) return nullptr;
+
+    // The piece that says most about the look first: the body, then the head, then the
+    // rest of the armour slots, then whatever is left - an amulet says little.
+    using Slot = RE::BGSBipedObjectForm::BipedObjectSlot;
+    static constexpr Slot kPreferred[] = {
+        Slot::kBody, Slot::kHead, Slot::kHair, Slot::kFeet, Slot::kHands, Slot::kCalves,
+        Slot::kForearms, Slot::kShield, Slot::kTail, Slot::kCirclet,
+    };
+    for (const Slot slot : kPreferred) {
+        for (auto* armor : pieces) {
+            if ((static_cast<std::uint32_t>(armor->GetSlotMask()) &
+                 static_cast<std::uint32_t>(slot)) != 0) {
+                return armor;
+            }
+        }
+    }
+    return pieces.front();
 }
 
 void OutfitSlotManager::ApplyHands(RE::Actor* actor, bool noWeapon) const

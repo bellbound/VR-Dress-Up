@@ -66,7 +66,8 @@ public:
     // they are wearing - into a new slot, then Select it. Returns the new id.
     std::uint32_t SaveCurrent(RE::Actor* actor);
 
-    // Delete a saved outfit. If it is the one on the actor, they go to NPC Default first.
+    // Delete a saved outfit. If it is the one on the actor, they are put into the outfit
+    // before it in the row (else the one after), or back to NPC Default if it was the last.
     // The outfit's items stay in their inventory.
     bool Remove(RE::Actor* actor, std::uint32_t id);
 
@@ -75,7 +76,7 @@ public:
     void SyncEdited(RE::Actor* actor, std::uint32_t id);
 
     // A piece to draw on the slot's plate: the body piece if the outfit has one, else the
-    // first piece that still resolves. Null for an empty outfit.
+    // head, then the other armour slots, then whatever is left. Null for an empty outfit.
     RE::TESObjectARMO* Representative(RE::Actor* actor, std::uint32_t id) const;
 
 private:
