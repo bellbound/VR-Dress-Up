@@ -170,6 +170,11 @@ void WeaponLockManager::StopEnforcing(RE::Actor* actor)
         actor->GetName(), actorID);
 }
 
+bool WeaponLockManager::HoldsWeapon(RE::Actor* actor)
+{
+    return actor && !HeldWeapons(actor).empty();
+}
+
 bool WeaponLockManager::IsEnforcing(RE::Actor* actor) const
 {
     if (!actor) {

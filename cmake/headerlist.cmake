@@ -20,6 +20,7 @@ set(headers ${headers}
     src/dressup/KeywordCategoryManager.h
     src/dressup/UndressManager.h
     src/dressup/OutfitLockManager.h
+    src/dressup/OutfitSlotManager.h
     src/dressup/WeaponLockManager.h
     src/dressup/OutfitFormBackend.h
     src/dressup/SeverActionsCompat.h

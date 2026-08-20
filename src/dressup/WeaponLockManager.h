@@ -60,6 +60,10 @@ public:
 
     bool IsEnforcing(RE::Actor* actor) const;
 
+    // Is the actor holding a weapon somebody could take off them? The engine's hand-to-hand
+    // form and creature attacks do not count - the same rule enforcement judges by.
+    static bool HoldsWeapon(RE::Actor* actor);
+
     // Called after the player changes an NPC's weapons through the menu.
     //
     // `nowHolding` is what the player's click asked for, not what the engine has applied
