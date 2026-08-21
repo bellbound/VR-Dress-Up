@@ -604,10 +604,15 @@ struct Root : Container {
     // free-standing text alike - bends without any of them being told about it.
     //
     //   radius     Radius of the cylinder the plane is rolled onto, in game units.
-    //              0 turns curvature off. Smaller bends harder; the distance the
-    //              menu sits from the player's head is a good first guess, since it
-    //              wraps the menu onto a sphere around them. Around 90 suits a menu
-    //              at arm's length.
+    //              0 turns curvature off. Smaller bends harder.
+    //
+    //              Judge it against the menu's own half-width, not against how far
+    //              away it sits: what the eye reads as "curved" is how far round the
+    //              cylinder the edges get carried, which is halfWidth/radius. Twice
+    //              the half-width puts the edge at about 30 degrees and reads as a
+    //              firm, deliberate curve; ten times it is a bow you have to look
+    //              for. A menu about 45 units to its widest element therefore wants
+    //              a radius near 45, not the 90-odd units it sits from the head.
     //   horizontal Bend left and right edges forward. The usual choice: menus grow
     //              wider far more often than they grow taller.
     //   vertical   Bend top and bottom edges forward as well, giving a dome rather

@@ -50,10 +50,20 @@ class DressupMenuManager
 {
 public:
     // Radius of the cylinder the menu is wrapped onto, in game units - see the call
-    // in SetupDressUpMenu. About the distance the menu ends up from the head once it
-    // is placed at the hand, which is what makes the curve read as "wrapped around
-    // the player" rather than "bent". Smaller bends harder; 0 is flat again.
-    static constexpr float kMenuCurveRadius = 90.0f;
+    // in SetupDressUpMenu. Smaller bends harder; 0 is flat again.
+    //
+    // Set against the menu's half-width rather than its distance from the head,
+    // because how curved it looks is how far round the cylinder the edges are
+    // carried - halfWidth/radius - and not how far away the whole thing is. The
+    // widest thing here is the item spiral, whose outer ring lands around 45 units
+    // out; the rows below it are half that. A radius of 45 therefore carries the
+    // spiral's edge through a full radian and the row ends through about a third of
+    // one, which is a curve you see rather than one you have to look for.
+    //
+    // It was 90 first, on the reasoning that the menu sits about that far from the
+    // head. That is the wrong thing to measure: at 90 the spiral edge came forward
+    // 11 units and the row ends barely 3, and the whole thing read as flat.
+    static constexpr float kMenuCurveRadius = 45.0f;
 
     static DressupMenuManager* GetSingleton()
     {
@@ -130,11 +140,10 @@ public:
         // it after they have laid out, so spacings, ring counts and scroll extents
         // are all still the flat numbers they were tuned as.
         //
-        // Radius roughly the distance the menu sits from the head, so it wraps onto
-        // a sphere around the player rather than bending toward some point in front
-        // of them. Horizontal only: the menu is wider than it is tall, and a row
-        // that curved vertically as well would tip its plates away from a hand
-        // coming in from below.
+        // Radius is set against how wide the menu is - see kMenuCurveRadius.
+        // Horizontal only: the menu is wider than it is tall, and a row that curved
+        // vertically as well would tip its plates away from a hand coming in from
+        // below.
         m_root->SetCurvature(kMenuCurveRadius, /*horizontal*/ true, /*vertical*/ false,
                              /*tiltElements*/ true);
 
