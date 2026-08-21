@@ -14,6 +14,7 @@
 #include "dressup/GalleryStateManager.h"
 #include "dressup/MenuScrollMemory.h"
 #include "dressup/DressHistory.h"
+#include "dressup/MenuScale.h"
 #include "dressup/ArmorModManager.h"
 #include "InventoryManager.h"
 
@@ -212,6 +213,10 @@ SKSEPluginLoad(const SKSE::LoadInterface *skse) {
 
 	// Load settings from INI file
 	Settings::GetSingleton()->Load();
+
+	// Before anything builds an element out of them. Every distance in the menu is written
+	// at scale 1 and multiplied on its way to 3DUI, so this has to be in place first.
+	MenuScale::Set(Settings::GetSingleton()->GetMenuScale());
 
 	auto messaging = SKSE::GetMessagingInterface();
 	if (!messaging->RegisterListener("SKSE", MessageHandler)) {

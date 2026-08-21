@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include "../api/ThreeDUIInterface001.h"
+#include "MenuScale.h"
 
 // The one place the menu's colours are written down.
 //
@@ -25,6 +26,9 @@ namespace Backdrop
     // size for a whole row instead of one size per model. A unit sphere at scale S comes
     // out S/2 units across, so each of these is set just inside its row's spacing - a
     // backdrop wider than the gap between two elements reads as one smeared plate.
+    //
+    // These are the scale-1 sizes; Apply multiplies them by fMenuScale, which multiplies
+    // the row spacings quoted beside them by exactly the same amount.
     constexpr float kCategoryScale = 20.0f;  // gallery row, 12.0 column spacing
     constexpr float kItemScale     = 14.0f;  // item spiral, 8.0 item spacing
     constexpr float kOutfitScale   = 16.0f;  // outfit row, 10.8 column spacing
@@ -116,12 +120,13 @@ namespace Backdrop
     }
 
     // The one place that puts a backdrop on an element, so every row agrees about which
-    // mesh it is.
+    // mesh it is - and the one place fMenuScale reaches the plates, so a plate cannot grow
+    // out of step with the row spacing it was set just inside of.
     inline void Apply(P3DUI::Element* element, float scale, const Tint& tint)
     {
         if (!element) return;
         element->SetBackgroundModel(kModel);
-        element->SetBackgroundScale(scale);
+        element->SetBackgroundScale(MenuScale::Scaled(scale));
         element->SetBackgroundColor(tint.r, tint.g, tint.b, tint.a, tint.glow);
     }
 

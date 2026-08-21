@@ -3,8 +3,10 @@
 #include <Windows.h>
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include "log.h"
+#include "dressup/MenuScale.h"
 
 class Settings
 {
@@ -43,6 +45,9 @@ public:
         m_enableModGallery = GetPrivateProfileIntA("General", "bEnableModGallery", 0, m_iniPath.c_str()) != 0;
         m_enableCategoryGallery = GetPrivateProfileIntA("General", "bEnableCategoryGallery", 1, m_iniPath.c_str()) != 0;
 
+        // [Menu] section
+        m_menuScale = ReadClampedFloat("Menu", "fMenuScale", 1.0f, MenuScale::kMin, MenuScale::kMax);
+
         // [Outfit] section
         m_useOutfitBackend = GetPrivateProfileIntA("Outfit", "bUseOutfitBackend", 1, m_iniPath.c_str()) != 0;
         m_outfitBackendUniqueOnly = GetPrivateProfileIntA("Outfit", "bOutfitBackendUniqueOnly", 1, m_iniPath.c_str()) != 0;
@@ -58,6 +63,7 @@ public:
 
         spdlog::info("Settings: bEnableModGallery = {}", m_enableModGallery);
         spdlog::info("Settings: bEnableCategoryGallery = {}", m_enableCategoryGallery);
+        spdlog::info("Settings: fMenuScale = {:.2f}", m_menuScale);
         spdlog::info("Settings: bUseOutfitBackend = {}", m_useOutfitBackend);
         spdlog::info("Settings: bOutfitBackendUniqueOnly = {}", m_outfitBackendUniqueOnly);
         spdlog::info("Settings: bSeverActionsCompat = {}", m_severActionsCompat);
@@ -71,6 +77,7 @@ public:
     // Accessors
     bool IsModGalleryEnabled() const { return m_enableModGallery; }
     bool IsCategoryGalleryEnabled() const { return m_enableCategoryGallery; }
+    float GetMenuScale() const { return m_menuScale; }
     bool IsOutfitBackendEnabled() const { return m_useOutfitBackend; }
     bool IsOutfitBackendUniqueOnly() const { return m_outfitBackendUniqueOnly; }
     bool IsSeverActionsCompatEnabled() const { return m_severActionsCompat; }
@@ -102,6 +109,33 @@ private:
         return clamped;
     }
 
+    // Same job as ReadClamped for a fractional setting. There is no GetPrivateProfileFloat,
+    // so the value comes back as text; anything that is not a number at all - an empty key,
+    // a stray word - leaves the fallback in place rather than reading as zero, which for a
+    // scale would shrink the menu out of existence.
+    float ReadClampedFloat(const char* section, const char* key,
+                           float fallback, float lo, float hi) const
+    {
+        char buffer[64]{};
+        GetPrivateProfileStringA(section, key, "", buffer, sizeof(buffer), m_iniPath.c_str());
+
+        char* end = nullptr;
+        const float raw = std::strtof(buffer, &end);
+        if (end == buffer) {
+            if (buffer[0] != 0) {
+                spdlog::warn("Settings: {} = '{}' is not a number, using {}", key, buffer, fallback);
+            }
+            return fallback;
+        }
+
+        const float clamped = std::clamp(raw, lo, hi);
+        if (clamped != raw) {
+            spdlog::warn("Settings: {} = {} is out of range [{}, {}], using {}",
+                key, raw, lo, hi, clamped);
+        }
+        return clamped;
+    }
+
     std::string ReadString(const char* section, const char* key, const char* fallback) const
     {
         char buffer[64]{};
@@ -113,6 +147,9 @@ private:
 
     // [Debug]
     std::string m_logLevel = "info";  // trace | debug | info | warn | error | off
+
+    // [Menu]
+    float m_menuScale = 1.0f;  // One multiplier over every distance the menu is built from
 
     // [General]
     bool m_enableModGallery = false;      // Default: disabled

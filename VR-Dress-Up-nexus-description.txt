@@ -62,6 +62,8 @@ Whatever you put on them stays on them.[/b][/quote]
 [b]bEnableModGallery[/b] - the row with one entry per installed mod.
 [b]bEnableCategoryGallery[/b] - the row with one entry per item category. Both rows share the same armour scan, and neither runs until you press its button.
 
+[b]fMenuScale[/b] - how big the whole menu is. One multiplier over every distance it is built from: the size of each piece of armour and each button, the plates behind them, the gaps between them, how far each row hangs below the one above, how hard the whole thing curves, and how close a hand has to come before something lights up. 1.0 is the size it has always been; try 1.25 if the armour is hard to tell apart at a glance, or 0.8 if the outer rings of the wheel sit further than you want to reach.
+
 [b]bUseOutfitBackend[/b] - assign a real Outfit form when DressUp takes over an NPC's look. This is what makes SPID stand down. Turn it off for plain equip-only enforcement.
 [b]bOutfitBackendUniqueOnly[/b] - skip NPCs whose base record is shared between copies, so dressing one generic bandit doesn't dress every bandit.
 [b]bSeverActionsCompat[/b] - take NPCs DressUp dresses out of SeverActions' outfit system for as long as it holds their look.

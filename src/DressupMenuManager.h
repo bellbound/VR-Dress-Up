@@ -14,6 +14,7 @@
 #include "dressup/UndressManager.h"
 #include "dressup/ArmorModManager.h"
 #include "dressup/Backdrop.h"
+#include "dressup/MenuScale.h"
 #include "dressup/GalleryStateManager.h"
 #include "dressup/KeywordCategoryManager.h"
 #include "dressup/MenuScrollMemory.h"
@@ -70,7 +71,15 @@ public:
     // 3, and read as flat. 30 wrapped the outer ring round far enough that it began
     // reaching back toward the player's shoulder, which costs more in reach than the
     // curve wins. 37.5 keeps the wrap and drops the overshoot.
+    //
+    // All of that is stated as a ratio against the menu's half-width, which is why it
+    // goes through MenuScale like every other distance: a menu grown by fMenuScale is
+    // that much wider, and a radius left behind would wrap it that much harder.
     static constexpr float kMenuCurveRadius = 37.5f;
+
+    // 3DUI's own default, named here because it is scaled rather than left to the config's
+    // factory - see the comment where it is set.
+    static constexpr float kHoverThreshold = 10.0f;
 
     static DressupMenuManager* GetSingleton()
     {
@@ -132,6 +141,11 @@ public:
         rootConfig.activationButtonMask = vr::ButtonMaskFromId(vr::k_EButton_SteamVR_Trigger);
         rootConfig.grabButtonMask = vr::ButtonMaskFromId(vr::k_EButton_Grip);
         rootConfig.eventCallback = &DressupMenuManager::OnEvent;
+        // How close a hand comes before an element lights up. A world distance from the
+        // element's centre, so it has to grow with the plates: left at 10 on a menu at
+        // scale 2 the threshold would sit inside the artwork, and the player would be
+        // pushing their hand through a plate to hover it.
+        rootConfig.hoverThreshold = MenuScale::Scaled(kHoverThreshold);
 
         m_root = m_api->GetOrCreateRoot(rootConfig);
         if (!m_root) {
@@ -156,14 +170,14 @@ public:
         // the sides had been. The worry about a vertical bend tipping plates away
         // from a hand coming from below does not survive contact: elements below
         // centre tip *up*, into that hand, and only the ones above tip down.
-        m_root->SetCurvature(kMenuCurveRadius, /*horizontal*/ true, /*vertical*/ true,
-                             /*tiltElements*/ true);
+        m_root->SetCurvature(MenuScale::Scaled(kMenuCurveRadius), /*horizontal*/ true,
+                             /*vertical*/ true, /*tiltElements*/ true);
 
         // === Create Item Spiral (ScrollWheel) ===
         P3DUI::ScrollWheelConfig spiralConfig = P3DUI::ScrollWheelConfig::Default("item_spiral");
-        spiralConfig.itemSpacing = 8.0f;
-        spiralConfig.ringSpacing = 10.0f;
-        spiralConfig.firstRingSpacing = 15.0f;
+        spiralConfig.itemSpacing = MenuScale::Scaled(8.0f);
+        spiralConfig.ringSpacing = MenuScale::Scaled(10.0f);
+        spiralConfig.firstRingSpacing = MenuScale::Scaled(15.0f);
 
         m_itemSpiral = m_api->CreateScrollWheel(spiralConfig);
         if (m_itemSpiral) {
@@ -172,28 +186,28 @@ public:
 
         // === Create Handle Row (using ColumnGrid with single row) ===
         P3DUI::ColumnGridConfig handleRowConfig = P3DUI::ColumnGridConfig::Default("handle_row");
-        handleRowConfig.columnSpacing = 7.5f;   // 0.75x the original 10.0 - the tool row reads as one group
+        handleRowConfig.columnSpacing = MenuScale::Scaled(7.5f);   // 0.75x the original 10.0 - the tool row reads as one group
         handleRowConfig.numRows = 1;
-        handleRowConfig.visibleWidth = 1000.0f;  // Large enough to show all items without scrolling
+        handleRowConfig.visibleWidth = MenuScale::Scaled(1000.0f);  // Large enough to show all items without scrolling
 
         m_handleRow = m_api->CreateColumnGrid(handleRowConfig);
         if (m_handleRow) {
             m_handleRow->SetOrigin(P3DUI::VerticalOrigin::Center, P3DUI::HorizontalOrigin::Center);
             m_root->AddChild(m_handleRow);
-            m_handleRow->SetLocalPosition(0, 0, -10.5f);
+            m_handleRow->SetLocalPosition(0, 0, MenuScale::Scaled(kToolRowZ));
         }
 
         // === Create Gallery Row (ColumnGrid for mod/keyword categories - horizontal scrolling) ===
         P3DUI::ColumnGridConfig galleryConfig = P3DUI::ColumnGridConfig::Default("gallery_row");
-        galleryConfig.columnSpacing = 12.0f;
-        galleryConfig.visibleWidth = 48.0f;   // +20% over the original 40.0; both gallery modes share this row
+        galleryConfig.columnSpacing = MenuScale::Scaled(12.0f);
+        galleryConfig.visibleWidth = MenuScale::Scaled(48.0f);   // +20% over the original 40.0; both gallery modes share this row
         galleryConfig.numRows = 1;
 
         m_galleryRow = m_api->CreateColumnGrid(galleryConfig);
         if (m_galleryRow) {
             m_galleryRow->SetOrigin(P3DUI::VerticalOrigin::Center, P3DUI::HorizontalOrigin::Center);
             m_root->AddChild(m_galleryRow);
-            m_galleryRow->SetLocalPosition(0, 0, -20.0f);  // Below handle row
+            m_galleryRow->SetLocalPosition(0, 0, MenuScale::Scaled(kToolRowZ - kRowStepZ));  // Below handle row
             m_galleryRow->SetVisible(false);  // Hidden by default
         }
 
@@ -203,15 +217,15 @@ public:
         // snapshots rather than armour to study, so more of them on screen beats bigger
         // ones. -10% spacing against the gallery's 12.0, +10% visible width against its
         // 48.0, and Backdrop::kOutfitScale sizes the plate to sit inside the new gap.
-        outfitConfig.columnSpacing = 10.8f;
-        outfitConfig.visibleWidth = 52.8f;
+        outfitConfig.columnSpacing = MenuScale::Scaled(10.8f);
+        outfitConfig.visibleWidth = MenuScale::Scaled(52.8f);
         outfitConfig.numRows = 1;
 
         m_outfitRow = m_api->CreateColumnGrid(outfitConfig);
         if (m_outfitRow) {
             m_outfitRow->SetOrigin(P3DUI::VerticalOrigin::Center, P3DUI::HorizontalOrigin::Center);
             m_root->AddChild(m_outfitRow);
-            m_outfitRow->SetLocalPosition(0, 0, -20.0f);  // LayoutRows moves it
+            m_outfitRow->SetLocalPosition(0, 0, MenuScale::Scaled(kToolRowZ - kRowStepZ));  // LayoutRows moves it
             m_outfitRow->SetVisible(false);
         }
 
@@ -220,26 +234,26 @@ public:
         // where the eye already is rather than under the rows with the info text.
         P3DUI::TextConfig editingConfig = P3DUI::TextConfig::Default("editing_text");
         editingConfig.text = L"";
-        editingConfig.scale = 1.0f;
+        editingConfig.scale = MenuScale::Scaled(1.0f);
         editingConfig.facingMode = P3DUI::FacingMode::YawOnly;
 
         m_editingText = m_api->CreateText(editingConfig);
         if (m_editingText) {
             m_root->AddChild(m_editingText);
-            m_editingText->SetLocalPosition(0, 0, kEditingTextZ);
+            m_editingText->SetLocalPosition(0, 0, MenuScale::Scaled(kEditingTextZ));
             m_editingText->SetVisible(false);
         }
 
         // === Create Info Text (context-dependent display below tool/gallery row) ===
         P3DUI::TextConfig infoTextConfig = P3DUI::TextConfig::Default("info_text");
         infoTextConfig.text = L"";  // Initially empty
-        infoTextConfig.scale = 1.0f;
+        infoTextConfig.scale = MenuScale::Scaled(1.0f);
         infoTextConfig.facingMode = P3DUI::FacingMode::YawOnly;
 
         m_infoText = m_api->CreateText(infoTextConfig);
         if (m_infoText) {
             m_root->AddChild(m_infoText);
-            m_infoText->SetLocalPosition(0, 0, -18.0f);  // Below handle row (moves when gallery opens)
+            m_infoText->SetLocalPosition(0, 0, InfoTextZ());  // Below handle row (moves when gallery opens)
             m_infoText->SetVisible(false);
         }
 
@@ -551,7 +565,7 @@ private:
         P3DUI::ElementConfig config = P3DUI::ElementConfig::Default(id);
         config.texturePath = HistoryTexture(undo, enabled);
         config.tooltip = HistoryTooltip(undo, enabled);
-        config.scale = 1.2f;
+        config.scale = MenuScale::Scaled(1.2f);
         config.facingMode = P3DUI::FacingMode::None;
         return m_api->CreateElement(config);
     }
@@ -606,7 +620,7 @@ private:
             invMgr->IsTargetPlayer() ? L" (You)" : L"";
 
         P3DUI::ElementConfig undressConfig = P3DUI::ElementConfig::Default("undress_button");
-        undressConfig.scale = 1.2f;
+        undressConfig.scale = MenuScale::Scaled(1.2f);
         undressConfig.facingMode = P3DUI::FacingMode::None;
 
         std::wstring undressTooltip;
@@ -639,7 +653,7 @@ private:
                 ? "textures\\VRDressup\\outfits_highlight.dds"
                 : "textures\\VRDressup\\outfits.dds";
             outfitsConfig.tooltip = m_outfitRowVisible ? L"Close Outfits" : L"Outfits";
-            outfitsConfig.scale = 1.2f;
+            outfitsConfig.scale = MenuScale::Scaled(1.2f);
             outfitsConfig.facingMode = P3DUI::FacingMode::None;
 
             auto* outfitsButton = m_api->CreateElement(outfitsConfig);
@@ -666,7 +680,7 @@ private:
             P3DUI::ElementConfig invToggleConfig = P3DUI::ElementConfig::Default("inventory_toggle");
             invToggleConfig.texturePath = inventoryIcon.c_str();
             invToggleConfig.tooltip = toggleTooltip.c_str();
-            invToggleConfig.scale = 1.2f;
+            invToggleConfig.scale = MenuScale::Scaled(1.2f);
             invToggleConfig.facingMode = P3DUI::FacingMode::None;
 
             auto* inventoryToggle = m_api->CreateElement(invToggleConfig);
@@ -683,7 +697,7 @@ private:
                 ? "textures\\VRDressup\\gallery_highlight.dds"
                 : "textures\\VRDressup\\gallery.dds";
             galleryConfig.tooltip = showingMods ? L"Close Gallery" : L"Mod Gallery";
-            galleryConfig.scale = 1.2f;
+            galleryConfig.scale = MenuScale::Scaled(1.2f);
             galleryConfig.facingMode = P3DUI::FacingMode::None;
 
             auto* galleryButton = m_api->CreateElement(galleryConfig);
@@ -700,7 +714,7 @@ private:
                 ? "textures\\VRDressup\\clothes_highlight.dds"
                 : "textures\\VRDressup\\clothes.dds";
             keywordConfig.tooltip = showingKeywords ? L"Close Categories" : L"Browse by Category";
-            keywordConfig.scale = 1.2f;
+            keywordConfig.scale = MenuScale::Scaled(1.2f);
             keywordConfig.facingMode = P3DUI::FacingMode::None;
 
             auto* keywordButton = m_api->CreateElement(keywordConfig);
@@ -823,7 +837,7 @@ private:
         // Item 0: Anchor handle (Close/Grab) - always first in spiral
         P3DUI::ElementConfig anchorConfig = P3DUI::ElementConfig::Default("anchor_handle");
         anchorConfig.modelPath = "meshes\\Magic\\orbunequip.nif";
-        anchorConfig.scale = 1.2f;
+        anchorConfig.scale = MenuScale::Scaled(1.2f);
         anchorConfig.rotationPitch = 90.0f;
         anchorConfig.facingMode = P3DUI::FacingMode::None;
         anchorConfig.isAnchorHandle = true;
@@ -854,7 +868,7 @@ private:
 
             P3DUI::ElementConfig itemConfig = P3DUI::ElementConfig::Default(itemId.c_str());
             itemConfig.tooltip = itemTooltip.c_str();
-            itemConfig.scale = 1.0f;
+            itemConfig.scale = MenuScale::Scaled(1.0f);
 
             // Use formID for auto model path and corrections
             if (inventoryItem.armor) {
@@ -1012,7 +1026,7 @@ private:
 
             P3DUI::ElementConfig itemConfig = P3DUI::ElementConfig::Default(itemId.c_str());
             itemConfig.tooltip = itemTooltip.c_str();
-            itemConfig.scale = 1.0f;
+            itemConfig.scale = MenuScale::Scaled(1.0f);
             itemConfig.formID = armor->GetFormID();
             itemConfig.modelPath = modelPath.c_str();
 
@@ -1140,7 +1154,7 @@ private:
                 : "textures\\VRDressup\\trash.dds";
             const std::wstring deleteTooltip = DeleteTooltip(*worn);
             deleteConfig.tooltip = deleteTooltip.c_str();
-            deleteConfig.scale = 1.2f;
+            deleteConfig.scale = MenuScale::Scaled(1.2f);
             deleteConfig.facingMode = P3DUI::FacingMode::None;
 
             m_outfitDeleteButton = m_api->CreateElement(deleteConfig);
@@ -1158,7 +1172,7 @@ private:
                 : "textures\\VRDressup\\npc.dds";
             const std::wstring defaultTooltip = SwitchTooltip(kDefaultPlate);
             defaultConfig.tooltip = defaultTooltip.c_str();
-            defaultConfig.scale = 1.2f;
+            defaultConfig.scale = MenuScale::Scaled(1.2f);
             defaultConfig.facingMode = P3DUI::FacingMode::None;
 
             m_outfitDefaultElement = m_api->CreateElement(defaultConfig);
@@ -1177,7 +1191,7 @@ private:
             P3DUI::ElementConfig saveConfig = P3DUI::ElementConfig::Default("outfit_save");
             saveConfig.texturePath = "textures\\VRDressup\\save.dds";
             saveConfig.tooltip = L"Save current look as a new outfit";
-            saveConfig.scale = 1.2f;
+            saveConfig.scale = MenuScale::Scaled(1.2f);
             saveConfig.facingMode = P3DUI::FacingMode::None;
 
             auto* saveButton = m_api->CreateElement(saveConfig);
@@ -1204,12 +1218,12 @@ private:
             // undressed NPC, saved - has no piece to show and gets the undressed figure.
             std::string modelPath;
             if (auto* armor = previews[i]) {
-                plateConfig.scale = 1.0f;
+                plateConfig.scale = MenuScale::Scaled(1.0f);
                 plateConfig.formID = armor->GetFormID();
                 modelPath = ItemEquipHelper::GetModelPath(armor);
                 plateConfig.modelPath = modelPath.c_str();
             } else {
-                plateConfig.scale = 1.2f;
+                plateConfig.scale = MenuScale::Scaled(1.2f);
                 plateConfig.texturePath = "textures\\VRDressup\\undress-full.dds";
             }
 
@@ -1232,12 +1246,14 @@ private:
     }
 
     // The number under a plate. Smaller and closer than the default label, so it stays
-    // clear of the row below when the gallery is open under this one.
+    // clear of the row below when the gallery is open under this one - which is why the
+    // offset is scaled as well as the text: on a bigger plate a fixed drop would land the
+    // number back on the artwork.
     static void SetOutfitLabel(P3DUI::Element* element, const wchar_t* text)
     {
         element->SetLabelText(text);
-        element->SetLabelTextScale(0.7f);
-        element->SetLabelOffset(0.0f, 0.0f, -6.5f);
+        element->SetLabelTextScale(MenuScale::Scaled(0.7f));
+        element->SetLabelOffset(0.0f, 0.0f, MenuScale::Scaled(-6.5f));
     }
 
     // Which saved outfit the row should light up. The slot being edited, while it still
@@ -1811,9 +1827,14 @@ private:
 
     // Stack whatever rows are open under the tool row, in a fixed order - the gallery
     // first, then outfits - and put the info text under the lowest of them.
+    //
+    // The stack is worked out in scale-1 units and scaled once on the way out, so the gaps
+    // between the rows keep step with the plates that fill them however big the menu is.
     static constexpr float kToolRowZ = -10.5f;
     static constexpr float kRowStepZ = 10.0f;
     static constexpr float kEditingTextZ = -5.5f;  // between the wheel's handle and the tool row
+    static constexpr float kLoneInfoTextZ = -18.0f;  // with no row open, where it always has sat
+    static constexpr float kInfoTextGapZ = 8.0f;     // ...and under the lowest row when there is one
 
     float InfoTextZ() const
     {
@@ -1821,7 +1842,7 @@ private:
         if (m_outfitRowVisible) z -= kRowStepZ;
         if (IsGalleryVisible()) z -= kRowStepZ;
         // With no row open the text sits a little closer, where it always has.
-        return (z == kToolRowZ) ? -18.0f : z - 8.0f;
+        return MenuScale::Scaled((z == kToolRowZ) ? kLoneInfoTextZ : z - kInfoTextGapZ);
     }
 
     void LayoutRows()
@@ -1833,11 +1854,11 @@ private:
         // outfit row is a handful of plates the player picks from and leaves alone.
         if (m_galleryRow && IsGalleryVisible()) {
             z -= kRowStepZ;
-            m_galleryRow->SetLocalPosition(0, 0, z);
+            m_galleryRow->SetLocalPosition(0, 0, MenuScale::Scaled(z));
         }
         if (m_outfitRow && m_outfitRowVisible) {
             z -= kRowStepZ;
-            m_outfitRow->SetLocalPosition(0, 0, z);
+            m_outfitRow->SetLocalPosition(0, 0, MenuScale::Scaled(z));
         }
         if (m_infoText) {
             m_infoText->SetLocalPosition(0, 0, InfoTextZ());
@@ -1882,7 +1903,7 @@ private:
                 ? "textures\\VRDressup\\gallery.dds"
                 : "textures\\VRDressup\\clothes.dds";
             loadingConfig.tooltip = showingMods ? L"Loading mods..." : L"Loading categories...";
-            loadingConfig.scale = 1.2f;
+            loadingConfig.scale = MenuScale::Scaled(1.2f);
             loadingConfig.facingMode = P3DUI::FacingMode::None;
 
             auto* loadingElement = m_api->CreateElement(loadingConfig);
@@ -2034,7 +2055,7 @@ private:
 
             P3DUI::ElementConfig catConfig = P3DUI::ElementConfig::Default(categoryId.c_str());
             catConfig.tooltip = tooltip.c_str();
-            catConfig.scale = 1.0f;
+            catConfig.scale = MenuScale::Scaled(1.0f);
 
             // Use representative armor for the category icon
             // Store model path in local variable to ensure pointer validity until CreateElement
@@ -2079,7 +2100,7 @@ private:
 
             P3DUI::ElementConfig catConfig = P3DUI::ElementConfig::Default(categoryId.c_str());
             catConfig.tooltip = tooltip.c_str();
-            catConfig.scale = 1.0f;
+            catConfig.scale = MenuScale::Scaled(1.0f);
 
             // Preview the category with one of its own items
             // Store model path in local variable to ensure pointer validity until CreateElement
