@@ -59,19 +59,17 @@ public:
     // widest thing here is the item spiral, whose outer ring lands around 45 units
     // out; the rows below it are half that.
     //
-    // At 30 the spiral's edge is carried through most of a right angle and comes
-    // some 28 units forward, and even the row ends - the part of the menu a hand
-    // actually lives in - move 10. The wheel wraps round the player rather than
-    // leaning toward them.
+    // At 37.5 the spiral's edge is carried through 1.2 radians and comes 24 units
+    // forward, while the row ends - the part of the menu a hand actually lives in -
+    // move 8.
     //
-    // It went 90, then 45, then here. 90 was picked against the distance from the
-    // head, which is the wrong thing to measure entirely: it carried the spiral edge
-    // forward 11 units and the row ends barely 3, and read as flat. 45 was visible
-    // but still polite. Going below 30 is possible - the tilt cap means the far
-    // elements stay legible however hard the curve gets - but the outer ring starts
-    // wrapping toward the player's shoulder, which costs more in reach than the
-    // curve wins.
-    static constexpr float kMenuCurveRadius = 30.0f;
+    // It went 90, then 45, then 30, and settled here between the last two. 90 was
+    // picked against the distance from the head, which is the wrong thing to measure
+    // entirely: it carried the spiral edge forward 11 units and the row ends barely
+    // 3, and read as flat. 30 wrapped the outer ring round far enough that it began
+    // reaching back toward the player's shoulder, which costs more in reach than the
+    // curve wins. 37.5 keeps the wrap and drops the overshoot.
+    static constexpr float kMenuCurveRadius = 37.5f;
 
     static DressupMenuManager* GetSingleton()
     {
@@ -149,10 +147,15 @@ public:
         // are all still the flat numbers they were tuned as.
         //
         // Radius is set against how wide the menu is - see kMenuCurveRadius.
-        // Horizontal only: the menu is wider than it is tall, and a row that curved
-        // vertically as well would tip its plates away from a hand coming in from
-        // below.
-        m_root->SetCurvature(kMenuCurveRadius, /*horizontal*/ true, /*vertical*/ false,
+        //
+        // Both axes, so the menu is a dome around the player rather than a length of
+        // guttering. It is nearly as tall as it is wide once the rows are stacked -
+        // the spiral reaches 45 above centre and the info text sits near 38 below -
+        // so curving only the width left the top and bottom as far out of reach as
+        // the sides had been. The worry about a vertical bend tipping plates away
+        // from a hand coming from below does not survive contact: elements below
+        // centre tip *up*, into that hand, and only the ones above tip down.
+        m_root->SetCurvature(kMenuCurveRadius, /*horizontal*/ true, /*vertical*/ true,
                              /*tiltElements*/ true);
 
         // === Create Item Spiral (ScrollWheel) ===
