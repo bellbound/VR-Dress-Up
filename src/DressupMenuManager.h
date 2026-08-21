@@ -49,6 +49,12 @@ enum class GalleryMode : std::uint8_t
 class DressupMenuManager
 {
 public:
+    // Radius of the cylinder the menu is wrapped onto, in game units - see the call
+    // in SetupDressUpMenu. About the distance the menu ends up from the head once it
+    // is placed at the hand, which is what makes the curve read as "wrapped around
+    // the player" rather than "bent". Smaller bends harder; 0 is flat again.
+    static constexpr float kMenuCurveRadius = 90.0f;
+
     static DressupMenuManager* GetSingleton()
     {
         static DressupMenuManager instance;
@@ -116,7 +122,21 @@ public:
             return false;
         }
 
-
+        // Bend the whole menu round the player like a curved monitor. It grew wide
+        // enough - a spiral of gear, a tool row, and up to two more rows under it -
+        // that the far edges sat past where an arm reaches without leaning, and
+        // every row that gets added makes that worse. The curve brings the edges
+        // forward and inward instead, which costs the layouts nothing: 3DUI applies
+        // it after they have laid out, so spacings, ring counts and scroll extents
+        // are all still the flat numbers they were tuned as.
+        //
+        // Radius roughly the distance the menu sits from the head, so it wraps onto
+        // a sphere around the player rather than bending toward some point in front
+        // of them. Horizontal only: the menu is wider than it is tall, and a row
+        // that curved vertically as well would tip its plates away from a hand
+        // coming in from below.
+        m_root->SetCurvature(kMenuCurveRadius, /*horizontal*/ true, /*vertical*/ false,
+                             /*tiltElements*/ true);
 
         // === Create Item Spiral (ScrollWheel) ===
         P3DUI::ScrollWheelConfig spiralConfig = P3DUI::ScrollWheelConfig::Default("item_spiral");
