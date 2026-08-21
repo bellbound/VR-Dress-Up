@@ -57,14 +57,21 @@ public:
     // because how curved it looks is how far round the cylinder the edges are
     // carried - halfWidth/radius - and not how far away the whole thing is. The
     // widest thing here is the item spiral, whose outer ring lands around 45 units
-    // out; the rows below it are half that. A radius of 45 therefore carries the
-    // spiral's edge through a full radian and the row ends through about a third of
-    // one, which is a curve you see rather than one you have to look for.
+    // out; the rows below it are half that.
     //
-    // It was 90 first, on the reasoning that the menu sits about that far from the
-    // head. That is the wrong thing to measure: at 90 the spiral edge came forward
-    // 11 units and the row ends barely 3, and the whole thing read as flat.
-    static constexpr float kMenuCurveRadius = 45.0f;
+    // At 30 the spiral's edge is carried through most of a right angle and comes
+    // some 28 units forward, and even the row ends - the part of the menu a hand
+    // actually lives in - move 10. The wheel wraps round the player rather than
+    // leaning toward them.
+    //
+    // It went 90, then 45, then here. 90 was picked against the distance from the
+    // head, which is the wrong thing to measure entirely: it carried the spiral edge
+    // forward 11 units and the row ends barely 3, and read as flat. 45 was visible
+    // but still polite. Going below 30 is possible - the tilt cap means the far
+    // elements stay legible however hard the curve gets - but the outer ring starts
+    // wrapping toward the player's shoulder, which costs more in reach than the
+    // curve wins.
+    static constexpr float kMenuCurveRadius = 30.0f;
 
     static DressupMenuManager* GetSingleton()
     {

@@ -647,11 +647,12 @@ struct Root : Container {
     //
     //              Judge it against the menu's own half-width, not against how far
     //              away it sits: what the eye reads as "curved" is how far round the
-    //              cylinder the edges get carried, which is halfWidth/radius. Twice
-    //              the half-width puts the edge at about 30 degrees and reads as a
-    //              firm, deliberate curve; ten times it is a bow you have to look
-    //              for. A menu about 45 units to its widest element therefore wants
-    //              a radius near 45, not the 90-odd units it sits from the head.
+    //              cylinder the edges get carried, which is halfWidth/radius. Ten
+    //              times the half-width is a bow you have to look for; twice it is a
+    //              clear curve; at about two thirds of it the edges are carried
+    //              through a full right angle and wrap hard around the player. A
+    //              menu 45 units to its widest element therefore wants a radius in
+    //              the 30s, not the 90-odd units it sits from the head.
     //   horizontal Bend left and right edges forward. The usual choice: menus grow
     //              wider far more often than they grow taller.
     //   vertical   Bend top and bottom edges forward as well, giving a dome rather
@@ -661,6 +662,11 @@ struct Root : Container {
     //              glancing angle. Ignored for any element whose own facingMode is
     //              not None - one that already turns to face the player has no use
     //              for it.
+    //
+    //              The turn is capped at about 50 degrees however hard the curve is,
+    //              so position goes on rolling round - which is where the reach comes
+    //              from - while the far elements stay legible instead of turning
+    //              their own edge to the player.
     //
     // Spacing is preserved along the arc, so no layout, spacing or scroll setting
     // needs adjusting when curvature is switched on: a row keeps its item count and
