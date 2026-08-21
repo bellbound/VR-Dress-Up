@@ -295,12 +295,9 @@ public:
         // Clear any existing items from item spiral. PopulateHandleRow runs before the
         // spiral is refilled, so the vector has to be emptied here rather than left to
         // RefreshItemSpiral - see the note there.
-        {
-            std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
-            m_itemElements.clear();
-            if (m_itemSpiral) {
-                m_itemSpiral->Clear();
-            }
+        m_itemElements.clear();
+        if (m_itemSpiral) {
+            m_itemSpiral->Clear();
         }
 
         // Populate handle row with inventory source selectors and handle
@@ -330,9 +327,31 @@ private:
         return GetSingleton()->HandleEvent(event);
     }
 
+    // A repaint that something off the main thread asked for, run now that we are on it.
+    //
+    // The rows may only be touched from the game's main thread - 3DUI says so in its
+    // header, under Thread Safety - and the SKSE task queue this used to post to is not
+    // drained there. Doing it anyway is what tore the wheel apart mid-rebuild on
+    // 2026-08-20; guarding the vectors with a mutex instead only moved the failure, since
+    // the main thread waits on that drain and a lock between them deadlocks.
+    //
+    // So the repaint waits for the callback below, which 3DUI documents as main-thread and
+    // fires on every hover and every press. A repaint is cosmetic and idempotent, so the
+    // worst a still hand can cost is a plate that stays one state stale until it moves -
+    // which is exactly what the wheel did before any of this existed.
+    void DrainPendingHighlight()
+    {
+        if (!m_highlightDirty.exchange(false)) return;
+        if (!IsMenuOpen()) return;
+
+        RefreshItemHighlight();
+    }
+
     // Instance event handler
     bool HandleEvent(const P3DUI::Event* event)
     {
+        DrainPendingHighlight();
+
         if (!event || !event->sourceID) return false;
 
         std::string id(event->sourceID);
@@ -587,8 +606,6 @@ private:
     {
         if (!m_itemSpiral || !m_api) return;
 
-        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
-
         // Forget the pointers before the container destroys what they point at. Clear()
         // tombstones every child, so between the two calls the vector names dead elements -
         // and RefreshItemHighlight, which runs from a queued task, walks exactly this
@@ -694,8 +711,6 @@ private:
     // it - dozens of models re-read from disk - to change one plate's colour.
     void RefreshItemHighlight()
     {
-        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
-
         // Parenthesised: Windows.h defines min as a macro.
         if (IsShowingGalleryItems()) {
             const size_t count = (std::min)(m_itemElements.size(), m_galleryArmorList.size());
@@ -722,24 +737,14 @@ private:
     // Arrives on the game thread from inside the engine's own equip processing, and an
     // outfit reapply announces dozens in a row, so the repaint is coalesced onto a single
     // task rather than run here: one repaint per drain no matter how many events fed it.
+    // Arrives on whatever thread the engine raised the equip on, so it does no more than
+    // raise a flag - see DrainPendingHighlight for why the repaint cannot happen here.
+    // The flag coalesces the burst for free: an outfit reapply sets it dozens of times and
+    // the drain repaints once.
     void OnWornStateChanged()
     {
         if (!IsMenuOpen()) return;
-
-        // Already one in flight - it will read the state after this event too.
-        if (m_highlightRepaintQueued.exchange(true)) return;
-
-        auto* task = SKSE::GetTaskInterface();
-        if (!task) {
-            m_highlightRepaintQueued = false;
-            return;
-        }
-
-        task->AddTask([this]() {
-            m_highlightRepaintQueued = false;
-            if (!IsMenuOpen()) return;
-            RefreshItemHighlight();
-        });
+        m_highlightDirty = true;
     }
 
     // One repaint just past the window a queued equip is believed for.
@@ -751,17 +756,12 @@ private:
     // turns the plate back into an offer once it has.
     void ScheduleSettleRepaint()
     {
-        PapyrusBridge::RunAfterMs(kSettleRepaintMs, [this]() {
-            if (!IsMenuOpen()) return;
-            RefreshItemHighlight();
-        });
+        PapyrusBridge::RunAfterMs(kSettleRepaintMs, [this]() { m_highlightDirty = true; });
     }
 
     // Refresh item spiral with armor from the active gallery category (mod or keyword)
     void RefreshItemSpiralWithGalleryArmor()
     {
-        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
-
         m_galleryArmorList = !m_activeModCategory.empty()
             ? ArmorModManager::GetSingleton()->GetArmorForMod(m_activeModCategory)
             : KeywordCategoryManager::GetSingleton()->GetItemsForCategory(m_activeKeywordCategory);
@@ -870,11 +870,11 @@ private:
 
         if (visible) {
             m_editingSlot = OutfitSlotManager::GetSingleton()->Worn(GetCurrentTargetActor());
-            RefreshOutfitRow();  // shows the row once it is full
+            UpdateBackdropScheme();  // before the row is built - see AfterOutfitChange
+            RefreshOutfitRow();      // shows the row once it is full
         } else {
             m_editingSlot.reset();
 
-            std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
             ForgetOutfitRowElements();
             if (m_outfitRow) {
                 m_outfitRow->Clear();
@@ -905,8 +905,6 @@ private:
     void RefreshOutfitRow()
     {
         if (!IsMenuOpen() || !m_outfitRow || !m_api || !m_outfitRowVisible) return;
-
-        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
 
         // Filled hidden and shown at the end. An element created into a visible container
         // spawns at the container's centre and flies out to its slot; created into a hidden
@@ -1043,8 +1041,6 @@ private:
     // Re-tint the row in place.
     void RefreshOutfitHighlight()
     {
-        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
-
         auto* slots = OutfitSlotManager::GetSingleton();
         RE::Actor* npc = GetCurrentTargetActor();
         const auto worn = HighlightedOutfit();
@@ -1160,8 +1156,6 @@ private:
     // The armed plate says what a second press costs; every other plate says its own name.
     void RetintSwitchTooltips()
     {
-        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
-
         if (m_outfitDefaultElement) {
             m_outfitDefaultElement->SetTooltip(SwitchTooltip(kDefaultPlate).c_str());
         }
@@ -1237,6 +1231,12 @@ private:
     // undress button, the row itself, and the editing text.
     void AfterOutfitChange()
     {
+        // Before the rebuilds, not after: an element is born with whatever palette is
+        // current, so flipping first means the new wheel comes up warm instead of being
+        // built cool and repainted. The repaint was the half that went missing when the
+        // frame that owed it never finished.
+        UpdateBackdropScheme();
+
         RefreshItemSpiral();
         PopulateHandleRow();
         RefreshOutfitRow();
@@ -1504,8 +1504,8 @@ private:
         UpdateInfoText();
     }
 
-    // Stack whatever rows are open under the tool row, in a fixed order - outfits first,
-    // then the gallery - and put the info text under the lowest of them.
+    // Stack whatever rows are open under the tool row, in a fixed order - the gallery
+    // first, then outfits - and put the info text under the lowest of them.
     static constexpr float kToolRowZ = -10.5f;
     static constexpr float kRowStepZ = 10.0f;
     static constexpr float kEditingTextZ = -5.5f;  // between the wheel's handle and the tool row
@@ -1522,13 +1522,17 @@ private:
     void LayoutRows()
     {
         float z = kToolRowZ;
-        if (m_outfitRow && m_outfitRowVisible) {
-            z -= kRowStepZ;
-            m_outfitRow->SetLocalPosition(0, 0, z);
-        }
+
+        // The gallery takes the near slot when both are open. Browsing is the thing with
+        // the long tail of scrolling, so it wants to be the row nearest the hand; the
+        // outfit row is a handful of plates the player picks from and leaves alone.
         if (m_galleryRow && IsGalleryVisible()) {
             z -= kRowStepZ;
             m_galleryRow->SetLocalPosition(0, 0, z);
+        }
+        if (m_outfitRow && m_outfitRowVisible) {
+            z -= kRowStepZ;
+            m_outfitRow->SetLocalPosition(0, 0, z);
         }
         if (m_infoText) {
             m_infoText->SetLocalPosition(0, 0, InfoTextZ());
@@ -1559,8 +1563,6 @@ private:
     {
         // Bail out if menu is closed - UI elements may be invalid
         if (!IsMenuOpen() || !m_galleryRow || !m_api || m_galleryMode == GalleryMode::None) return;
-
-        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
 
         m_categoryElements.clear();  // before Clear - see RefreshItemSpiral
         m_galleryRow->Clear();
@@ -1623,8 +1625,6 @@ private:
     // scrolled to in order to make the selection.
     void RefreshCategoryHighlight()
     {
-        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
-
         const int active = ActiveCategoryIndex();
 
         for (size_t i = 0; i < m_categoryElements.size(); ++i) {
@@ -1859,7 +1859,6 @@ public:
         m_root->SetVisible(false);
 
         // Clear item list. Same lock as the rebuilds: a repaint task may be in flight.
-        std::lock_guard<std::recursive_mutex> lock(m_elementsMutex);
         m_currentItemList.clear();
         m_itemElements.clear();
 
@@ -2114,24 +2113,9 @@ private:
     // m_categoryElements: cleared wherever the container it holds is.
     std::vector<P3DUI::Element*> m_itemElements;
 
-    // Whether a repaint is already queued for this drain. Written from the equip event on
-    // the game thread and cleared by the task it guards.
-    std::atomic<bool> m_highlightRepaintQueued{false};
-
-    // Guards every vector of live P3DUI elements above, and the lists they run parallel to.
-    //
-    // The rows are built from 3DUI's main-loop hook, but two things repaint them from an
-    // SKSE task - the coalesced worn-state repaint and the settle repaint - and the SKSE
-    // task queue is not drained on that thread. Without this a repaint could be halfway
-    // through the wheel when a rebuild destroyed the elements underneath it, and call a
-    // virtual on freed memory; that is the crash of 2026-08-20.
-    //
-    // Recursive because the rebuilds nest: RefreshItemSpiral hands off to
-    // RefreshItemSpiralWithGalleryArmor, and RefreshOutfitRow ends by calling
-    // RefreshOutfitHighlight. A rebuild holds it for as long as it takes to load its
-    // meshes, which is the point - a repaint that has to wait for that is a repaint that
-    // was going to be wrong anyway.
-    mutable std::recursive_mutex m_elementsMutex;
+    // A repaint the wheel owes, raised off the main thread and paid on it. See
+    // DrainPendingHighlight.
+    std::atomic<bool> m_highlightDirty{false};
 
     std::vector<ModCategoryInfo> m_categoryList;         // Mods currently in the gallery row
     std::vector<KeywordCategoryInfo> m_keywordCategoryList;  // Keyword categories currently in the gallery row

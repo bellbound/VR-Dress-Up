@@ -10,11 +10,12 @@
 // palette. Nothing else in the mod names a colour.
 //
 // There are two schemes. The normal one is cool: grey plates, a blue highlight, and warm
-// orange reserved for "a click puts this on". The editing one is warm throughout, and is
-// switched on while the wheel's edits are being written into a saved outfit - see
-// DressupMenuManager::UpdateBackdropScheme. Turning the whole menu red-orange is the point:
-// editing a saved outfit is the one mode where a click changes something the player will
-// still have after they walk away, and a line of text alone was easy to miss.
+// orange reserved for the pieces the actor has on. The editing one moves the same palette
+// round the wheel into purple, and is switched on while edits are being written into a
+// saved outfit - see DressupMenuManager::UpdateBackdropScheme. Editing is the one mode
+// where a click changes something the player still has after they walk away, and the line
+// of text saying so was easy to miss, so the whole menu shifts hue with it. Shifts, not
+// shouts: it has to be unmissable when you look for it and invisible when you are not.
 namespace Backdrop
 {
     constexpr const char* kModel = "meshes\\3DUI\\gradient-background-sphere.nif";
@@ -55,37 +56,46 @@ namespace Backdrop
     // to the mesh's blue and the glow roughly doubles, which picks it out of the row at a
     // glance without the row turning into a light show.
     //
-    // itemAvailable is the loud one, and it is deliberately the *un*equipped state: a wheel
-    // of gear is a wheel of choices, so what stands out should be what a click would change,
-    // not what is already settled. Reading it the other way round meant a fully dressed NPC
-    // lit the whole spiral up and the pieces still on offer were the dim ones. It is warm
-    // rather than one more step along the blue, because the gallery row already owns the
-    // blue and a brighter blue here would read as "selected".
+    // In the wheel it is the *equipped* piece that carries the warm orange, and everything
+    // still on offer that rests on plateIdle's grey. The wheel is a wheel of what this
+    // actor is wearing, and the thing worth finding at a glance is what is already on them
+    // - the rest is the wardrobe it was picked out of. It ran the other way round for a
+    // while, on the reasoning that a click should light up what it would change; in the
+    // headset that lit most of the spiral at once and the few pieces actually worn were
+    // lost in it.
     //
-    // itemEquipped shares plateIdle. It was a third as opaque and barely glowing at one
-    // point, on the reasoning that dozens at once would drown out the items, but in the
-    // headset that read as no plate at all - the items floated against whatever the player
-    // happened to be standing in front of.
+    // itemAvailable shares plateIdle so a row of choices reads as one surface, with the
+    // worn pieces standing off it.
     constexpr Palette kNormalPalette = {
         /* plateIdle     */ {0.55f, 0.62f, 0.72f, 1.00f, 1.00f},
         /* plateSelected */ {0.45f, 0.68f, 1.00f, 1.00f, 1.90f},
-        /* itemAvailable */ {1.00f, 0.72f, 0.42f, 1.00f, 1.70f},
-        /* itemEquipped  */ {0.55f, 0.62f, 0.72f, 1.00f, 1.00f},
+        /* itemAvailable */ {0.55f, 0.62f, 0.72f, 1.00f, 1.00f},
+        /* itemEquipped  */ {1.00f, 0.72f, 0.42f, 1.00f, 1.70f},
         /* armed         */ {1.00f, 0.30f, 0.25f, 1.00f, 1.90f},
     };
 
     // The warm scheme, worn while a saved outfit is taking the edits.
     //
-    // Same three steps as the cool one, rotated onto red-orange: a deep red-orange at rest,
-    // orange for the one that is on, and a pale amber for what a click would put on. The
-    // armed red has to stay legible against a red-orange row, so it goes further than its
-    // cool twin - almost pure red at the mesh's full glow.
+    // Same lightness, same glow, same three steps as the cool one - only the hue moves, off
+    // the blue and round past red into purple. A fully saturated red-orange was the first
+    // attempt and it read as an alarm: most of a row is resting plates, and the player is
+    // looking at the armour in front of them rather than the disc behind it, so the resting
+    // colour has to stay quiet. It has to be unmissable when you look for it and invisible
+    // when you are not.
+    //
+    // itemEquipped is deliberately identical to the cool scheme's. Which pieces the actor
+    // has on is the one thing that means the same in both modes, so it is the one plate
+    // that should not move when the mode does - and leaving it put gives the shifted
+    // colours around it something fixed to be read against.
+    //
+    // armed keeps its own red, further than its cool twin so it still separates from a row
+    // that no longer leans blue. Danger does not get to drift with the theme.
     constexpr Palette kEditingPalette = {
-        /* plateIdle     */ {0.80f, 0.32f, 0.14f, 1.00f, 1.15f},
-        /* plateSelected */ {1.00f, 0.60f, 0.14f, 1.00f, 2.00f},
-        /* itemAvailable */ {1.00f, 0.82f, 0.45f, 1.00f, 1.80f},
-        /* itemEquipped  */ {0.80f, 0.32f, 0.14f, 1.00f, 1.15f},
-        /* armed         */ {1.00f, 0.10f, 0.08f, 1.00f, 2.40f},
+        /* plateIdle     */ {0.70f, 0.58f, 0.68f, 1.00f, 1.00f},
+        /* plateSelected */ {1.00f, 0.55f, 0.70f, 1.00f, 1.90f},
+        /* itemAvailable */ {0.70f, 0.58f, 0.68f, 1.00f, 1.00f},
+        /* itemEquipped  */ {1.00f, 0.72f, 0.42f, 1.00f, 1.70f},
+        /* armed         */ {1.00f, 0.12f, 0.10f, 1.00f, 2.40f},
     };
 
     enum class Scheme : std::uint8_t { Normal, Editing };
