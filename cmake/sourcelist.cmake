@@ -5,6 +5,7 @@ set(sources ${sources}
     src/higgsinterface001.cpp
     src/dressup/OutfitLockManager.cpp
     src/dressup/OutfitSlotManager.cpp
+    src/dressup/DressHistory.cpp
     src/dressup/WeaponLockManager.cpp
     src/dressup/OutfitFormBackend.cpp
     src/dressup/SeverActionsCompat.cpp

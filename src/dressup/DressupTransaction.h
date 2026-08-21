@@ -66,6 +66,17 @@ public:
         return false;
     }
 
+    // FormIDs of everything handed over and not yet taken back.
+    std::vector<RE::FormID> TransferredFormIDs() const
+    {
+        std::vector<RE::FormID> result;
+        result.reserve(m_transferredItems.size());
+        for (const auto& item : m_transferredItems) {
+            if (item.item) result.push_back(item.item->GetFormID());
+        }
+        return result;
+    }
+
     // Clear all tracking state
     void Clear()
     {

@@ -116,7 +116,7 @@ public:
 
         // Before the spiral is built, not after: if something else has dressed this NPC
         // since we last looked - a scene, a bath mod, the engine re-equipping their own
-        // gear while the equip-storm breaker was standing down - then the wheel would
+        // gear while the reapply throttle had us slowed down - then the wheel would
         // list that gear as theirs and every edit would be made on top of it. Puts the
         // locked outfit back first, so the player edits what they locked. No-op for an
         // unlocked actor, or one already wearing the locked set.
@@ -391,6 +391,41 @@ public:
             AutoLockNpc();
         }
         return undressStateCleared;
+    }
+
+    // === Hand-overs, for DressHistory ===
+    //
+    // Undo and redo move pieces between the player's pack and the NPC the same way the
+    // wheel does, minus the equip: the restore puts the outfit on as a whole afterwards.
+
+    // Everything handed over from the player's pack in this menu session and not yet taken back.
+    std::vector<RE::FormID> TransferredItems() const
+    {
+        return m_transaction.TransferredFormIDs();
+    }
+
+    // Move one piece from the player's pack to the NPC and remember it as a hand-over.
+    bool GiveToTarget(RE::TESBoundObject* item)
+    {
+        auto* player = RE::PlayerCharacter::GetSingleton();
+        if (!item || !m_targetActor || !player) return false;
+        if (!ItemEquipHelper::HasItemInInventory(player, item)) {
+            spdlog::warn("InventoryManager::GiveToTarget - Player doesn't have '{}'", item->GetName());
+            return false;
+        }
+
+        ItemEquipHelper::TransferItem(player, m_targetActor, item);
+        m_transaction.TrackTransfer(item, true);
+        OutfitLockManager::GetSingleton()->MarkItemAsPlayerGiven(m_targetActor, item->GetFormID());
+
+        spdlog::info("InventoryManager::GiveToTarget - Handed '{}' to {}", item->GetName(), m_targetActor->GetName());
+        return true;
+    }
+
+    // Take a handed-over piece back off the NPC and into the player's pack.
+    void TakeBackFromTarget(RE::TESBoundObject* item)
+    {
+        ReverseTransfer(item);
     }
 
     void Reset()

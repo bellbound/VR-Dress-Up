@@ -197,6 +197,17 @@ public:
     void ReleaseGalleryItems(RE::Actor* actor);
 
     // === Default Outfit (Vanilla Restore) ===
+    //
+    // What an NPC wore before the player ever touched them, kept under "default" from the
+    // first edit until the lock is released. Unlock puts it back on before handing the NPC
+    // to the game: the engine only re-dresses some actors on its own when their outfit is
+    // restored - the rest stayed in whatever the player had left them in.
+
+    // Snapshot what an unlocked actor has on as their "default", if none is kept yet.
+    // No-op for a locked actor (their default was taken when they were first locked), for
+    // the player, and when one is already stored. Called at the start of every edit that
+    // can lock an actor, before anything comes off.
+    void RememberDefaultIfUnlocked(RE::Actor* actor);
 
     // Check if actor has a saved default (vanilla) outfit
     bool HasDefaultOutfit(RE::Actor* actor) const;
@@ -276,7 +287,7 @@ public:
     //
     // A menu edit used to end by snapshotting everything the actor had on and calling
     // that the locked outfit. That is only true if what they had on was ours to begin
-    // with. It often is not: while the equip-storm breaker is backed off, or inside the
+    // with. It often is not: while the reapply throttle has us slowed down, or inside the
     // reapply delay, a locked NPC can be wearing gear some other mod put there - and one
     // click then wrote that gear into the lock permanently. The pair below replaces the
     // snapshot with a delta, and gives the player a clean actor to edit in the first
@@ -287,10 +298,9 @@ public:
     std::vector<RE::FormID> SnapshotWornArmor(RE::Actor* actor) const;
 
     // Put a locked actor back into their locked outfit before the player starts editing
-    // it, so they are not dressing somebody else's gear. Clears any equip-storm or
-    // reapply stand-down first: the player has walked up and opened the wheel on this
-    // actor, which is worth one reapply even mid-storm. No-op when they are already
-    // wearing the locked set.
+    // it, so they are not dressing somebody else's gear. Drops any reapply throttle first:
+    // the player has walked up and opened the wheel on this actor, which is worth one
+    // reapply even mid-fight. No-op when they are already wearing the locked set.
     void ReconcileBeforeUserEdit(RE::Actor* actor);
 
     // Fold one menu edit into the stored "locked" outfit, as the difference between what
@@ -351,30 +361,6 @@ private:
         RE::FormID m_actorID;
     };
 
-    // === Equip-storm circuit breaker ===
-    //
-    // When another mod puts an NPC into an equip/unequip loop, every event fans out into
-    // Papyrus (XPMSE restyle, Devious Devices slotmasks, OBody presets) and the suspended
-    // stack count climbs until the VM tries to freeze itself to dump stacks - a 30s stall
-    // per attempt. We cannot stop the loop, but we can refuse to feed it and we can name
-    // the actor responsible in our own log instead of leaving it to be reconstructed from
-    // six different logs afterwards.
-    static constexpr std::int64_t kStormWindowMs = 1000;
-    static constexpr std::uint32_t kStormThreshold = 40;   // events per actor per window
-    static constexpr std::int64_t kStormBackoffMs = 30000;
-
-    // Record one equip event for this actor. Returns true when the actor is in backoff.
-    bool NoteEquipAndCheckStorm(RE::FormID actorID, const char* actorName);
-
-    // Is this actor currently backed off? Cheap; used to skip reapplies.
-    bool IsInEquipBackoff(RE::FormID actorID) const;
-
-    // Drop a tripped stand-down for this actor - both the per-event storm breaker and the
-    // reapply leaky bucket. Returns true if either was active. Only the player opening the
-    // wheel on the actor calls this: it is a deliberate override of a limiter that exists
-    // to keep us out of a fight with another mod, not something to do on a timer.
-    bool ClearEquipBackoff(RE::FormID actorID);
-
     // How long a reconcile stands as done. Equips are queued, so the actor still looks
     // wrong for a frame or two after one; without this a second menu open in that window
     // would fire another full reapply.
@@ -390,36 +376,70 @@ private:
     // a locked NPC in place - a scene, a bath mod, an outfit manager we did not detect -
     // stayed undressed until the player walked them through a door.
     //
-    // Two limiters keep that from becoming a fight. The delay coalesces a burst (one outfit
-    // swap is a dozen equip events) into a single reapply. The leaky bucket below then caps
-    // the *sustained* rate: credit drains at one reapply per iReapplySustainedIntervalSec,
-    // so a handful of reapplies close together passes as a fluke, while anything that keeps
-    // undressing the NPC faster than we are willing to redress them fills the bucket and
-    // trips a long stand-down. The alternative is trading equips with the other mod forever,
-    // and every exchange runs XPMSE/DD/OBody Papyrus for both of us.
+    // The delay coalesces a burst (one outfit swap is a dozen equip events) into a single
+    // reapply. The throttle below then caps the *sustained* rate, because the other half of
+    // the problem is a mod that undresses the NPC as fast as we redress them: every one of
+    // those exchanges runs XPMSE/DD/OBody Papyrus for both mods, and the suspended stack
+    // count climbs until the VM tries to freeze itself to dump stacks - a 30s stall each
+    // time. We cannot stop the other mod. We can refuse to keep up with it.
+    //
+    // This was two limiters with two hard stand-downs: a per-event storm breaker (40 equip
+    // events in a second, then 30s of silence) and a leaky bucket on our own reapplies (5
+    // too close together, then 300s of silence). They measured two symptoms of one fight
+    // and both gated the same single action, so one of them was always redundant - and a
+    // stand-down is the wrong shape of answer anyway. For as long as it held, the NPC stayed
+    // in whatever the other mod had chosen, and we had no idea whether the fight was still
+    // going, because we had stopped looking.
+    //
+    // One limiter now, and it never stops looking. Pressure rises by one per attempt that
+    // found the actor genuinely out of their outfit and falls with idle time; the interval
+    // between attempts is derived from it, doubling per unit of pressure past
+    // iReapplyBurstAllowance up to iReapplyMaxIntervalSec. Under the allowance nothing is
+    // throttled at all. At the top we are still redressing the NPC once a minute - often
+    // enough that they spend most of their time dressed, rarely enough that the Papyrus cost
+    // is noise - and the first attempt that finds them already correct is what tells us the
+    // fight is over and lets us speed back up.
 
     // Something other than us changed a locked actor's armour. Schedules a reapply.
     void NoteExternalOutfitChange(RE::Actor* actor, RE::FormID baseObject);
 
-    // Fires on the main thread once the coalescing delay is up.
+    // Put a reapply on the timer, at the coalescing delay or at the far side of the current
+    // throttle interval, whichever is later. False if one was already on its way. Nothing
+    // here refuses outright: an attempt is deferred, never abandoned, so the one that
+    // discovers the fight has ended always eventually happens.
+    bool ScheduleReapply(RE::FormID actorID, const char* actorName, const char* reason);
+
+    // Fires on the main thread once that delay is up.
     void RunPendingReapply(RE::FormID actorID);
 
-    // Charge one reapply against this actor's budget. False means we are backing off.
-    bool ClaimReapplySlot(RE::FormID actorID, const char* actorName);
+    // Fold one attempt into this actor's pressure and set the earliest the next may run.
+    // Charged whether or not the actor had actually diverged: an attempt that found nothing
+    // still costs a full inventory walk, and a mod thrashing gear that is not in the outfit
+    // would otherwise buy itself one of those per coalescing delay forever.
+    void NoteReapplyAttempt(RE::FormID actorID, const char* actorName, bool diverged);
+
+    // How long to wait between attempts at the given pressure.
+    std::int64_t ReapplyIntervalMs(double pressure) const;
+
+    // Drop this actor's throttle back to nothing. Returns true if it was slowed. Only the
+    // player opening the wheel on the actor calls this: it is a deliberate override of a
+    // limiter that exists to keep us out of a fight with another mod, not something to do
+    // on a timer.
+    bool ResetReapplyThrottle(RE::FormID actorID);
 
     // Is what the actor is wearing still the locked set? Another mod re-equipping a piece
-    // that is already part of the outfit is not a divergence, and must not cost either
-    // equip traffic or a slot in the budget above - otherwise a mod that merely refreshes
-    // gear would trip the breaker without ever having undressed anyone.
+    // that is already part of the outfit is not a divergence, and must not add pressure -
+    // otherwise a mod that merely refreshes gear would slow us down without ever having
+    // undressed anyone.
     bool DiffersFromLockedOutfit(RE::Actor* actor) const;
 
     struct ReapplyState
     {
-        bool pending = false;              // a delayed reapply is already on its way
-        std::int64_t lastReapplyMs = 0;    // for draining the bucket
-        double burst = 0.0;                // bucket level, in reapplies
-        std::int64_t backoffUntilMs = 0;
-        bool reported = false;
+        bool pending = false;                // a delayed reapply is already on its way
+        std::int64_t nextAttemptMs = 0;      // earliest the next attempt may run
+        double pressure = 0.0;               // in reapplies; sets the interval, drains when idle
+        std::int64_t reportedIntervalMs = 0; // slowest interval already written to the log
+        bool lastAttemptWasted = false;      // the last attempt found nothing to put back
     };
     std::unordered_map<RE::FormID, ReapplyState> m_reapply;
     mutable std::mutex m_reapplyMutex;
@@ -463,16 +483,6 @@ private:
     mutable std::mutex m_selfDrivenMutex;
     std::atomic<int> m_selfDrivenCount{0};
 
-    struct EquipRate
-    {
-        std::int64_t windowStartMs = 0;
-        std::uint32_t count = 0;
-        std::int64_t backoffUntilMs = 0;
-        bool reported = false;
-    };
-    std::unordered_map<RE::FormID, EquipRate> m_equipRate;
-    mutable std::mutex m_equipRateMutex;
-
     // Last time we reapplied a locked outfit, per actor, for the debounce above.
     std::unordered_map<RE::FormID, std::int64_t> m_lastApplyMs;
     mutable std::mutex m_lastApplyMutex;
@@ -480,6 +490,7 @@ private:
 
 // RAII helper for outfit modifications on potentially locked actors
 // - Tracks whether actor was locked before changes
+// - Keeps what an unlocked actor had on as their "default", for the eventual unlock
 // - Folds the changes made inside the scope into the locked outfit on exit
 // Usage: ScopedLockSuspension suspension(actor);
 //        ... make outfit changes ...
@@ -487,8 +498,8 @@ private:
 //
 // The exit used to call SaveOutfit, i.e. snapshot everything worn and call that the lock.
 // It no longer does. A snapshot cannot tell the piece the player just clicked from a piece
-// another mod put on while we were backed off, and Vendressa's log is what that costs: the
-// equip-storm breaker stood down for 30s, the engine re-dressed her out of her own
+// another mod put on while we were slowed down, and Vendressa's log is what that costs: we
+// spent 30s not reapplying to her, the engine re-dressed her out of her own
 // inventory, and the next click wrote all seven of those pieces into her locked outfit -
 // 7 items in, 12 items out - with no way back. Only what this scope actually changed goes
 // in or out now; see UpdateLockedOutfitFromEdit.
@@ -507,6 +518,9 @@ public:
 
         if (m_actor && m_wasLocked) {
             m_wornBefore = mgr->SnapshotWornArmor(m_actor);
+        } else if (m_actor) {
+            // The first edit: this is the last moment their own look is still on them.
+            mgr->RememberDefaultIfUnlocked(m_actor);
         }
     }
 

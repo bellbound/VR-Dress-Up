@@ -17,6 +17,7 @@
 #include "dressup/GalleryStateManager.h"
 #include "dressup/KeywordCategoryManager.h"
 #include "dressup/MenuScrollMemory.h"
+#include "dressup/DressHistory.h"
 #include "dressup/ItemEquipHelper.h"
 #include "dressup/PapyrusBridge.h"
 #include "openvr.h"
@@ -305,6 +306,9 @@ public:
         invMgr->SetTargetActor(targetActor);
         invMgr->SetTargetIsPlayer(false);  // Start in NPC inventory mode
 
+        // A fresh session has nothing to undo - see DressHistory for why it is per session.
+        DressHistory::GetSingleton()->Clear();
+
         const char* actorName = targetActor->GetName();
         spdlog::info("DressupMenuManager::ShowDressUpMenu - Opening menu for actor: {} (0x{:X}), hand: {}",
             actorName ? actorName : "unknown",
@@ -429,6 +433,16 @@ private:
                 return true;
             }
 
+            // Undo / redo
+            if (id == "undo_button") {
+                OnUndoClicked();
+                return true;
+            }
+            if (id == "redo_button") {
+                OnRedoClicked();
+                return true;
+            }
+
             // Inventory toggle
             if (id == "inventory_toggle") {
                 OnToggleInventorySource();
@@ -516,45 +530,75 @@ private:
         return false;
     }
 
-    // Populate handle row with inventory toggle, filter toggle, and lock button
+    // The undo and redo buttons' faces. A button with nothing behind it is drawn greyed
+    // out and its press does nothing - see OnUndoClicked.
+    static const char* HistoryTexture(bool undo, bool enabled)
+    {
+        if (undo) {
+            return enabled ? "textures\\VRDressup\\undo.dds" : "textures\\VRDressup\\undo_disabled.dds";
+        }
+        return enabled ? "textures\\VRDressup\\redo.dds" : "textures\\VRDressup\\redo_disabled.dds";
+    }
+
+    static const wchar_t* HistoryTooltip(bool undo, bool enabled)
+    {
+        if (undo) return enabled ? L"Undo" : L"Nothing to undo";
+        return enabled ? L"Redo" : L"Nothing to redo";
+    }
+
+    P3DUI::Element* CreateHistoryButton(const char* id, bool undo, bool enabled)
+    {
+        P3DUI::ElementConfig config = P3DUI::ElementConfig::Default(id);
+        config.texturePath = HistoryTexture(undo, enabled);
+        config.tooltip = HistoryTooltip(undo, enabled);
+        config.scale = 1.2f;
+        config.facingMode = P3DUI::FacingMode::None;
+        return m_api->CreateElement(config);
+    }
+
+    // The history moved without the row being rebuilt: swap the faces in place.
+    void RefreshUndoRedoButtons()
+    {
+        auto* history = DressHistory::GetSingleton();
+        if (m_undoButton) {
+            const bool can = history->CanUndo();
+            m_undoButton->SetTexture(HistoryTexture(true, can));
+            m_undoButton->SetTooltip(HistoryTooltip(true, can));
+        }
+        if (m_redoButton) {
+            const bool can = history->CanRedo();
+            m_redoButton->SetTexture(HistoryTexture(false, can));
+            m_redoButton->SetTooltip(HistoryTooltip(false, can));
+        }
+    }
+
+    // Populate the tool row: undo, redo, undress, outfits, player/NPC toggle, galleries
     void PopulateHandleRow()
     {
         if (!m_handleRow || !m_api) return;
 
         m_handleRow->Clear();
+        m_undoButton = nullptr;
+        m_redoButton = nullptr;
 
         auto* invMgr = InventoryManager::GetSingleton();
 
-        // Get NPC name for toggle button text
-        RE::Actor* targetActor = invMgr->GetTargetActor();
-        const char* npcName = targetActor ? targetActor->GetName() : "NPC";
-
-        // Inventory source toggle button
-        std::wstring toggleTooltip;
-        if (invMgr->IsTargetPlayer()) {
-            toggleTooltip = ToWide(npcName);
-        } else {
-            toggleTooltip = ToWide(RE::PlayerCharacter::GetSingleton()->GetDisplayFullName());
-        }
-        std::string inventoryIcon = invMgr->IsTargetPlayer()
-            ? "textures\\VRDressup\\player.dds"
-            : "textures\\VRDressup\\npc.dds";
-
-        P3DUI::ElementConfig invToggleConfig = P3DUI::ElementConfig::Default("inventory_toggle");
-        invToggleConfig.texturePath = inventoryIcon.c_str();
-        invToggleConfig.tooltip = toggleTooltip.c_str();
-        invToggleConfig.scale = 1.2f;
-        invToggleConfig.facingMode = P3DUI::FacingMode::None;
-
-        auto* inventoryToggle = m_api->CreateElement(invToggleConfig);
-        if (inventoryToggle) {
-            m_handleRow->AddChild(inventoryToggle);
+        // Undo and redo lead the row
+        {
+            auto* history = DressHistory::GetSingleton();
+            m_undoButton = CreateHistoryButton("undo_button", true, history->CanUndo());
+            if (m_undoButton) {
+                m_handleRow->AddChild(m_undoButton);
+            }
+            m_redoButton = CreateHistoryButton("redo_button", false, history->CanRedo());
+            if (m_redoButton) {
+                m_handleRow->AddChild(m_redoButton);
+            }
         }
 
-        // Undress/Redress button - cycles through undress states. Follows the inventory
-        // toggle: in player mode it is the player who gets undressed, which is the whole
-        // reason it follows - getting your own gear off and back on is otherwise a trip
-        // through the pause menu, one slot at a time.
+        // Undress/Redress button - cycles through undress states. In player mode it is the
+        // player who gets undressed: getting your own gear off and back on is otherwise a
+        // trip through the pause menu, one slot at a time.
         RE::Actor* undressActor = UndressTarget();
         auto* undressMgr = UndressManager::GetSingleton();
         auto undressState = undressMgr->GetUndressState(undressActor);
@@ -601,6 +645,33 @@ private:
             auto* outfitsButton = m_api->CreateElement(outfitsConfig);
             if (outfitsButton) {
                 m_handleRow->AddChild(outfitsButton);
+            }
+        }
+
+        // Inventory source toggle - the icon shows who you would switch to
+        {
+            RE::Actor* targetActor = invMgr->GetTargetActor();
+            const char* npcName = targetActor ? targetActor->GetName() : "NPC";
+
+            std::wstring toggleTooltip;
+            if (invMgr->IsTargetPlayer()) {
+                toggleTooltip = ToWide(npcName);
+            } else {
+                toggleTooltip = ToWide(RE::PlayerCharacter::GetSingleton()->GetDisplayFullName());
+            }
+            std::string inventoryIcon = invMgr->IsTargetPlayer()
+                ? "textures\\VRDressup\\player.dds"
+                : "textures\\VRDressup\\npc.dds";
+
+            P3DUI::ElementConfig invToggleConfig = P3DUI::ElementConfig::Default("inventory_toggle");
+            invToggleConfig.texturePath = inventoryIcon.c_str();
+            invToggleConfig.tooltip = toggleTooltip.c_str();
+            invToggleConfig.scale = 1.2f;
+            invToggleConfig.facingMode = P3DUI::FacingMode::None;
+
+            auto* inventoryToggle = m_api->CreateElement(invToggleConfig);
+            if (inventoryToggle) {
+                m_handleRow->AddChild(inventoryToggle);
             }
         }
 
@@ -1368,6 +1439,79 @@ private:
         RefreshOutfitHighlight();
     }
 
+    // === Undo / redo ===
+    //
+    // Every press that changes what an actor has on records a snapshot of them first, and
+    // the history puts snapshots back - see DressHistory. The menu's part is the snapshot's
+    // one piece of menu state, the saved outfit being edited, and repainting afterwards.
+
+    DressSnapshot CaptureDress(RE::Actor* actor) const
+    {
+        DressSnapshot snap = DressHistory::Capture(actor);
+        snap.editingSlot = m_editingSlot;
+        return snap;
+    }
+
+    void RecordDress(DressActionKind kind, RE::Actor* actor, RE::FormID formID, DressSnapshot before)
+    {
+        DressHistory::GetSingleton()->Record(kind, actor, formID, std::move(before));
+        RefreshUndoRedoButtons();
+    }
+
+    void OnUndoClicked()
+    {
+        auto* history = DressHistory::GetSingleton();
+        if (!history->CanUndo()) return;   // greyed out: nothing behind it
+
+        DisarmOutfitPrompts();
+        if (const auto snap = history->Undo(m_editingSlot)) {
+            FollowRestoredDress(*snap);
+        }
+        RefreshUndoRedoButtons();
+    }
+
+    void OnRedoClicked()
+    {
+        auto* history = DressHistory::GetSingleton();
+        if (!history->CanRedo()) return;
+
+        DisarmOutfitPrompts();
+        if (const auto snap = history->Redo()) {
+            FollowRestoredDress(*snap);
+        }
+        RefreshUndoRedoButtons();
+    }
+
+    // The menu after DressHistory has put a snapshot back: the same editing session the
+    // press was made in, the edited outfit following the look the way it followed the
+    // edit, and every row rebuilt from the actor.
+    void FollowRestoredDress(const DressSnapshot& snap)
+    {
+        RE::Actor* npc = GetCurrentTargetActor();
+        auto* slots = OutfitSlotManager::GetSingleton();
+
+        // Only a slot that still exists, and only while the row is open - m_editingSlot is
+        // a property of the open row, and a save or delete since would have cleared the
+        // history anyway.
+        m_editingSlot.reset();
+        if (snap.editingSlot && m_outfitRowVisible && npc) {
+            for (const auto& slot : slots->List(npc)) {
+                if (slot.id == *snap.editingSlot) {
+                    m_editingSlot = snap.editingSlot;
+                    break;
+                }
+            }
+        }
+
+        // Before the repaint, so the plate lights: which outfit counts as "on" is judged by
+        // comparing the slot with the lock.
+        if (m_editingSlot && npc && OutfitLockManager::GetSingleton()->IsLocked(npc)) {
+            slots->SyncEdited(npc, *m_editingSlot);
+        }
+
+        AfterOutfitChange();
+    }
+
     // Everything that follows a change of which outfit is on: the wheel's worn marks, the
     // undress button, the row itself, and the editing text.
     void AfterOutfitChange()
@@ -1433,8 +1577,10 @@ private:
         if (ArmSwitchIfNeeded(kDefaultPlate)) return;
 
         spdlog::info("DressupMenuManager::OnOutfitDefaultClicked - '{}'", npc->GetName());
+        DressSnapshot before = CaptureDress(npc);
         slots->SelectDefault(npc);
         m_editingSlot.reset();
+        RecordDress(DressActionKind::Default, npc, 0, std::move(before));
         AfterOutfitChange();
     }
 
@@ -1462,9 +1608,11 @@ private:
 
         spdlog::info("DressupMenuManager::OnOutfitSelected - Outfit {} (id {}) for '{}'",
             index + 1, id, npc ? npc->GetName() : "?");
+        DressSnapshot before = CaptureDress(npc);
         if (slots->Select(npc, id)) {
             m_editingSlot = id;
         }
+        RecordDress(DressActionKind::Outfit, npc, 0, std::move(before));
         AfterOutfitChange();
     }
 
@@ -1475,6 +1623,9 @@ private:
         RE::Actor* npc = GetCurrentTargetActor();
         if (!npc) return;
 
+        // Not undoable, but not a boundary either: the edits before the save stay
+        // undoable, and the saved outfit keeps the look it was given - an undo only moves
+        // the body and the lock, and stops writing into the new slot.
         const std::uint32_t id = OutfitSlotManager::GetSingleton()->SaveCurrent(npc);
         m_editingSlot = id;
         AfterOutfitChange();
@@ -1516,6 +1667,7 @@ private:
             *worn, npc ? npc->GetName() : "?");
 
         m_outfitDeleteArmed = false;
+        DressHistory::GetSingleton()->Clear();   // same as Save: the slot list moves
         auto* slots = OutfitSlotManager::GetSingleton();
         slots->Remove(npc, *worn);
         // Whatever Remove put them into instead is the outfit being edited now - the same
@@ -1546,6 +1698,11 @@ private:
         auto* undressMgr = UndressManager::GetSingleton();
         auto state = undressMgr->GetUndressState(targetActor);
 
+        DressSnapshot before = CaptureDress(targetActor);
+        const auto kind = state == UndressState::FullyUndressed
+            ? DressActionKind::Redress
+            : DressActionKind::Undress;
+
         switch (state) {
             case UndressState::Dressed:
             default:  // Treat unknown states as dressed
@@ -1566,6 +1723,8 @@ private:
                 undressMgr->Redress(targetActor);
                 break;
         }
+
+        RecordDress(kind, targetActor, 0, std::move(before));
 
         // Refresh UI - equipped items changed, lock state may have changed
         RefreshItemSpiral();
@@ -2036,6 +2195,12 @@ public:
         Backdrop::SetScheme(Backdrop::Scheme::Normal);
         m_editingSlot.reset();
         ForgetOutfitRowElements();
+
+        // The history is a property of this session, like the hand-over list and the
+        // gallery marks it restores through.
+        DressHistory::GetSingleton()->Clear();
+        m_undoButton = nullptr;
+        m_redoButton = nullptr;
         if (m_outfitRow) {
             m_outfitRow->SetVisible(false);
         }
@@ -2150,9 +2315,11 @@ private:
             bool hadUndressState = targetActor && UndressManager::GetSingleton()->HasUndressState(targetActor);
 
             auto* armor = m_galleryArmorList[itemIndex];
-            if (armor) {
+            if (armor && targetActor) {
+                DressSnapshot before = CaptureDress(targetActor);
                 invMgr->EquipFromMod(armor);
                 spdlog::info("DressupMenuManager::OnItemSelected - Toggled gallery armor '{}'", armor->GetFullName());
+                RecordDress(DressActionKind::WheelToggle, targetActor, armor->GetFormID(), std::move(before));
             }
 
             // The plate the player just clicked has changed state - and so has any other
@@ -2181,6 +2348,13 @@ private:
         const auto& selectedItem = m_currentItemList[itemIndex];
         bool wasPlayerMode = invMgr->IsTargetPlayer();
 
+        // The NPC is who the click lands on, in player mode as much as in NPC mode: a
+        // piece picked from the player's pack goes onto them.
+        RE::Actor* targetActor = invMgr->GetTargetActor();
+        RE::FormID formID = selectedItem.armor ? selectedItem.armor->GetFormID()
+                          : selectedItem.weapon ? selectedItem.weapon->GetFormID() : 0;
+        DressSnapshot before = CaptureDress(targetActor);
+
         // Delegate to inventory manager based on item type
         // Returns true if undress state was cleared
         bool undressStateCleared = false;
@@ -2192,6 +2366,8 @@ private:
             spdlog::warn("DressupMenuManager::OnItemSelected - No form");
             return;
         }
+
+        RecordDress(DressActionKind::WheelToggle, targetActor, formID, std::move(before));
 
         // Refresh UI - in player mode: item was transferred out, need to refresh item list
         if (wasPlayerMode) {
@@ -2250,6 +2426,12 @@ private:
     std::vector<P3DUI::Element*> m_outfitElements;
     P3DUI::Element* m_outfitDefaultElement = nullptr;
     P3DUI::Element* m_outfitDeleteButton = nullptr;
+
+    // The undo and redo buttons at the head of the tool row, kept so their icon can be
+    // swapped in place when the history moves without rebuilding the row. Same lifetime
+    // rule as m_outfitDeleteButton: null whenever the row is cleared.
+    P3DUI::Element* m_undoButton = nullptr;
+    P3DUI::Element* m_redoButton = nullptr;
 
     bool m_initialized = false;
     bool m_isLeftHand = false;

@@ -313,6 +313,23 @@ public:
         spdlog::info("UndressManager::Redress - '{}' is now dressed", actor->GetName());
     }
 
+    // Put an undress state back as DressHistory recorded it: the state, and the outfit a
+    // redress would return to. Dressed means none, and drops whatever is there.
+    void RestoreState(RE::Actor* actor, UndressState state, const std::vector<std::string>& preundressKeys)
+    {
+        if (!actor) return;
+
+        if (state == UndressState::Dressed) {
+            ClearUndressState(actor);
+            return;
+        }
+
+        OutfitLockManager::GetSingleton()->SetOutfitFromFormKeys(actor, kPreUndressOutfitName, preundressKeys);
+        SetUndressState(actor, state);
+        spdlog::info("UndressManager::RestoreState - '{}' back to state {} ({} piece(s) to redress into)",
+            actor->GetName(), static_cast<int>(state), preundressKeys.size());
+    }
+
     // Clear state (called on gear change via menu or redress)
     void ClearUndressState(RE::Actor* actor)
     {

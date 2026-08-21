@@ -15,6 +15,7 @@ set(headers ${headers}
     src/api/ThreeDUIInterface001.h
     src/dressup/ArmorModManager.h
     src/dressup/DressupTransaction.h
+    src/dressup/DressHistory.h
     src/dressup/GalleryStateManager.h
     src/dressup/ItemEquipHelper.h
     src/dressup/KeywordCategoryManager.h

@@ -54,7 +54,7 @@ public:
         m_reapplyDelayMs = ReadClamped("Reapply", "iReapplyDelayMs", 750, 100, 10000);
         m_reapplySustainedIntervalSec = ReadClamped("Reapply", "iReapplySustainedIntervalSec", 10, 1, 600);
         m_reapplyBurstAllowance = ReadClamped("Reapply", "iReapplyBurstAllowance", 5, 1, 100);
-        m_reapplyBackoffSec = ReadClamped("Reapply", "iReapplyBackoffSec", 300, 5, 3600);
+        m_reapplyMaxIntervalSec = ReadClamped("Reapply", "iReapplyMaxIntervalSec", 60, 5, 3600);
 
         spdlog::info("Settings: bEnableModGallery = {}", m_enableModGallery);
         spdlog::info("Settings: bEnableCategoryGallery = {}", m_enableCategoryGallery);
@@ -65,7 +65,7 @@ public:
         spdlog::info("Settings: iReapplyDelayMs = {}", m_reapplyDelayMs);
         spdlog::info("Settings: iReapplySustainedIntervalSec = {}", m_reapplySustainedIntervalSec);
         spdlog::info("Settings: iReapplyBurstAllowance = {}", m_reapplyBurstAllowance);
-        spdlog::info("Settings: iReapplyBackoffSec = {}", m_reapplyBackoffSec);
+        spdlog::info("Settings: iReapplyMaxIntervalSec = {}", m_reapplyMaxIntervalSec);
     }
 
     // Accessors
@@ -79,7 +79,7 @@ public:
     std::int32_t GetReapplyDelayMs() const { return m_reapplyDelayMs; }
     std::int32_t GetReapplySustainedIntervalSec() const { return m_reapplySustainedIntervalSec; }
     std::int32_t GetReapplyBurstAllowance() const { return m_reapplyBurstAllowance; }
-    std::int32_t GetReapplyBackoffSec() const { return m_reapplyBackoffSec; }
+    std::int32_t GetReapplyMaxIntervalSec() const { return m_reapplyMaxIntervalSec; }
 
 private:
     Settings() = default;
@@ -88,7 +88,7 @@ private:
     Settings& operator=(const Settings&) = delete;
 
     // A hand-edited INI is the only way these are ever set, so a typo has to land on a
-    // usable value rather than on a zero delay or a thousand-second backoff.
+    // usable value rather than on a zero delay or an hour between attempts.
     std::int32_t ReadClamped(const char* section, const char* key,
                              std::int32_t fallback, std::int32_t lo, std::int32_t hi) const
     {
@@ -128,5 +128,5 @@ private:
     std::int32_t m_reapplyDelayMs = 750;        // Wait this long first, so one burst is one reapply
     std::int32_t m_reapplySustainedIntervalSec = 10;  // Sustained rate we are willing to keep up
     std::int32_t m_reapplyBurstAllowance = 5;   // Reapplies allowed back-to-back before that rate matters
-    std::int32_t m_reapplyBackoffSec = 300;     // Stand-down once we conclude we are in a tug-of-war
+    std::int32_t m_reapplyMaxIntervalSec = 60;  // Slowest we ever reapply, once we conclude we are in a tug-of-war
 };

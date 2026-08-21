@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <iterator>
 #include <spdlog/spdlog.h>
 
@@ -77,14 +78,11 @@ RE::BSEventNotifyControl OutfitLockManager::ProcessEvent(
         return RE::BSEventNotifyControl::kContinue;
     }
 
-    // Count the event even for the player, so the breaker sees the true rate.
-    const bool inStorm = NoteEquipAndCheckStorm(actorID, actor->GetName());
-
     // Someone else changed a locked NPC's gear: put it back. Ordered so that the usual
     // case - no locked NPC in the save, or none of this is enabled - costs two atomic
-    // loads. Nothing to do while a storm is already in progress either; feeding it is the
-    // one thing the breaker exists to prevent.
-    if (!inStorm && m_lockedCount.load(std::memory_order_relaxed) > 0 &&
+    // loads. Whether we are in a fight over this actor is decided further in, by the
+    // reapply throttle, which is the only thing that can act on the answer.
+    if (m_lockedCount.load(std::memory_order_relaxed) > 0 &&
         m_userEditCount.load(std::memory_order_relaxed) == 0 &&
         !actor->IsPlayerRef() &&
         Settings::GetSingleton()->IsReapplyOnExternalChangeEnabled()) {
@@ -176,7 +174,7 @@ RE::BSEventNotifyControl OutfitLockManager::ProcessEvent(
 }
 
 // =============================================================================
-// Re-entrancy, storm detection and debounce
+// Re-entrancy, reapply throttling and debounce
 // =============================================================================
 
 void OutfitLockManager::BeginSelfDriven(RE::FormID actorID)
@@ -204,82 +202,27 @@ bool OutfitLockManager::IsSelfDriven(RE::FormID actorID) const
     return m_selfDriven.contains(actorID);
 }
 
-bool OutfitLockManager::NoteEquipAndCheckStorm(RE::FormID actorID, const char* actorName)
+bool OutfitLockManager::ResetReapplyThrottle(RE::FormID actorID)
 {
     const std::int64_t now = NowMs();
 
-    std::lock_guard<std::mutex> lock(m_equipRateMutex);
-    auto& rate = m_equipRate[actorID];
-
-    if (now < rate.backoffUntilMs) {
-        return true;
-    }
-
-    // Backoff just expired - start clean rather than judging on a stale window.
-    if (rate.backoffUntilMs != 0) {
-        rate.backoffUntilMs = 0;
-        rate.reported = false;
-        rate.windowStartMs = now;
-        rate.count = 0;
-    }
-
-    if (now - rate.windowStartMs > kStormWindowMs) {
-        rate.windowStartMs = now;
-        rate.count = 0;
-    }
-
-    if (++rate.count < kStormThreshold) {
+    std::lock_guard<std::mutex> lock(m_reapplyMutex);
+    const auto it = m_reapply.find(actorID);
+    if (it == m_reapply.end()) {
         return false;
     }
 
-    rate.backoffUntilMs = now + kStormBackoffMs;
-    if (!rate.reported) {
-        rate.reported = true;
-        spdlog::error("OutfitLockManager - EQUIP STORM: '{}' (0x{:08X}) produced {} equip events in "
-                      "under {}ms. Backing off reapplies for {}s. Something else is cycling this "
-                      "actor's equipment; every one of those events also runs XPMSE/DD/OBody "
-                      "Papyrus, which is what drives the VM into a stack-dump freeze.",
-            actorName ? actorName : "unknown", actorID, rate.count, kStormWindowMs,
-            kStormBackoffMs / 1000);
-    }
-    return true;
-}
+    auto& state = it->second;
+    const bool wasThrottled = state.pressure > 0.0 || now < state.nextAttemptMs;
 
-bool OutfitLockManager::IsInEquipBackoff(RE::FormID actorID) const
-{
-    std::lock_guard<std::mutex> lock(m_equipRateMutex);
-    const auto it = m_equipRate.find(actorID);
-    return it != m_equipRate.end() && NowMs() < it->second.backoffUntilMs;
-}
+    state.pressure = 0.0;
+    state.nextAttemptMs = 0;
+    state.reportedIntervalMs = 0;
+    state.lastAttemptWasted = false;
+    // pending is deliberately left alone: that timer is already in flight, and the attempt
+    // it makes will find the actor dressed by whatever called us and cost nothing.
 
-bool OutfitLockManager::ClearEquipBackoff(RE::FormID actorID)
-{
-    const std::int64_t now = NowMs();
-    bool cleared = false;
-
-    {
-        std::lock_guard<std::mutex> lock(m_equipRateMutex);
-        const auto it = m_equipRate.find(actorID);
-        if (it != m_equipRate.end() && now < it->second.backoffUntilMs) {
-            cleared = true;
-        }
-        // Erased rather than zeroed: leaving the window and count behind would have the
-        // breaker judge the next second against events from before the stand-down.
-        m_equipRate.erase(actorID);
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(m_reapplyMutex);
-        const auto it = m_reapply.find(actorID);
-        if (it != m_reapply.end() && now < it->second.backoffUntilMs) {
-            cleared = true;
-            it->second.backoffUntilMs = 0;
-            it->second.burst = 0.0;
-            it->second.reported = false;
-        }
-    }
-
-    return cleared;
+    return wasThrottled;
 }
 
 void OutfitLockManager::BeginUserEdit()
@@ -321,14 +264,17 @@ void OutfitLockManager::NoteExternalOutfitChange(RE::Actor* actor, RE::FormID ba
     }
 
     const RE::FormID actorID = actor->GetFormID();
-    const std::int64_t now = NowMs();
 
     // Peek before the expensive test: during a burst this is every event after the first,
-    // and IsLocked takes m_mutex - which ApplyOutfit holds - on the game thread.
+    // and IsLocked takes m_mutex - which ApplyOutfit holds - on the game thread. One
+    // pending reapply covers the whole burst, however long the throttle has stretched it,
+    // so a mod thrashing this actor pays for one IsLocked per interval rather than one per
+    // event. That is what the per-event storm breaker used to buy us, without the mutex it
+    // took on the game thread for every equip in the loaded area.
     {
         std::lock_guard<std::mutex> lock(m_reapplyMutex);
         const auto it = m_reapply.find(actorID);
-        if (it != m_reapply.end() && (it->second.pending || now < it->second.backoffUntilMs)) {
+        if (it != m_reapply.end() && it->second.pending) {
             return;
         }
     }
@@ -337,24 +283,48 @@ void OutfitLockManager::NoteExternalOutfitChange(RE::Actor* actor, RE::FormID ba
         return;
     }
 
-    const auto delayMs = Settings::GetSingleton()->GetReapplyDelayMs();
+    ScheduleReapply(actorID, actor->GetName(), "had armour changed by something else");
+}
+
+bool OutfitLockManager::ScheduleReapply(RE::FormID actorID, const char* actorName,
+    const char* reason)
+{
+    const std::int64_t now = NowMs();
+    std::int64_t delayMs = Settings::GetSingleton()->GetReapplyDelayMs();
+    bool wasted = false;
 
     {
         std::lock_guard<std::mutex> lock(m_reapplyMutex);
         auto& state = m_reapply[actorID];
-        if (state.pending || now < state.backoffUntilMs) {
-            return;  // lost the race against another event on this actor
+        if (state.pending) {
+            return false;  // lost the race against another event on this actor
+        }
+        wasted = state.lastAttemptWasted;
+        // Not "too soon, drop it" but "too soon, so aim at the far side of the wait". The
+        // throttle only ever defers an attempt; if it could refuse one outright we would be
+        // back to a stand-down, and back to not knowing when the fight ended.
+        if (state.nextAttemptMs - now > delayMs) {
+            delayMs = state.nextAttemptMs - now;
         }
         state.pending = true;
     }
 
-    spdlog::info("OutfitLockManager - '{}' (0x{:08X}) had armour changed by something else; "
-                 "reapplying the locked outfit in {}ms",
-        actor->GetName(), actorID, delayMs);
+    // Something that re-equips a piece the outfit already contains wakes us on every event
+    // and never actually diverges, so the attempt it buys finds nothing to do. Those are
+    // worth a line only at trace: at the base delay this is otherwise one per 750ms per
+    // actor, for as long as whatever is doing it keeps going.
+    if (wasted) {
+        spdlog::trace("OutfitLockManager - '{}' (0x{:08X}) {}; checking again in {}ms",
+            actorName ? actorName : "unknown", actorID, reason, delayMs);
+    } else {
+        spdlog::info("OutfitLockManager - '{}' (0x{:08X}) {}; reapplying the locked outfit in {}ms",
+            actorName ? actorName : "unknown", actorID, reason, delayMs);
+    }
 
-    PapyrusBridge::RunAfterMs(delayMs, [actorID]() {
+    PapyrusBridge::RunAfterMs(static_cast<std::int32_t>(delayMs), [actorID]() {
         GetSingleton()->RunPendingReapply(actorID);
     });
+    return true;
 }
 
 void OutfitLockManager::RunPendingReapply(RE::FormID actorID)
@@ -383,19 +353,16 @@ void OutfitLockManager::RunPendingReapply(RE::FormID actorID)
         return;
     }
 
-    // The per-event breaker may have tripped while we were waiting.
-    if (IsInEquipBackoff(actorID)) {
-        spdlog::warn("OutfitLockManager - Not reapplying to '{}': equip-storm backoff", actor->GetName());
-        return;
-    }
+    const bool diverged = DiffersFromLockedOutfit(actor);
 
-    if (!DiffersFromLockedOutfit(actor)) {
+    // Charged either way, and before the early return below: finding the actor already
+    // correct is not a free attempt, it is the observation the whole throttle is built to
+    // make, and it is what lets us speed back up.
+    NoteReapplyAttempt(actorID, actor->GetName(), diverged);
+
+    if (!diverged) {
         spdlog::trace("OutfitLockManager - '{}' is already wearing the locked outfit, nothing to reapply",
             actor->GetName());
-        return;
-    }
-
-    if (!ClaimReapplySlot(actorID, actor->GetName())) {
         return;
     }
 
@@ -441,51 +408,79 @@ bool OutfitLockManager::DiffersFromLockedOutfit(RE::Actor* actor) const
     return want != worn;
 }
 
-bool OutfitLockManager::ClaimReapplySlot(RE::FormID actorID, const char* actorName)
+std::int64_t OutfitLockManager::ReapplyIntervalMs(double pressure) const
 {
     const auto* settings = Settings::GetSingleton();
-    const double allowance = static_cast<double>(settings->GetReapplyBurstAllowance());
+    const std::int64_t baseMs = settings->GetReapplyDelayMs();
+    const std::int64_t maxMs = static_cast<std::int64_t>(settings->GetReapplyMaxIntervalSec()) * 1000;
+
+    // Under the allowance nothing is throttled at all: an NPC stripped and redressed a few
+    // times in a row is a fluke, not a fight, and pays only the plain coalescing delay.
+    const double over = pressure - static_cast<double>(settings->GetReapplyBurstAllowance());
+    if (over <= 0.0) {
+        return baseMs;
+    }
+
+    // Then double per unit of pressure past it. Capped at 20 shifts so a long fight cannot
+    // run the intermediate off the end of the type; maxMs clamps it far below that anyway.
+    // (std:: spelled out longhand: Windows.h has min and max as macros here.)
+    int steps = static_cast<int>(std::ceil(over));
+    if (steps > 20) steps = 20;
+    const std::int64_t scaled = baseMs << steps;
+
+    // max is written by hand and may well be set below the delay; the delay wins, because a
+    // reapply is not worth doing faster than its own burst-coalescing window.
+    const std::int64_t capped = scaled < maxMs ? scaled : maxMs;
+    return capped > baseMs ? capped : baseMs;
+}
+
+void OutfitLockManager::NoteReapplyAttempt(RE::FormID actorID, const char* actorName,
+    bool diverged)
+{
+    const auto* settings = Settings::GetSingleton();
     const double drainPerMs = 1.0 / (settings->GetReapplySustainedIntervalSec() * 1000.0);
-    const std::int64_t backoffMs = static_cast<std::int64_t>(settings->GetReapplyBackoffSec()) * 1000;
+    const std::int64_t baseMs = settings->GetReapplyDelayMs();
 
     const std::int64_t now = NowMs();
 
     std::lock_guard<std::mutex> lock(m_reapplyMutex);
     auto& state = m_reapply[actorID];
 
-    if (now < state.backoffUntilMs) {
-        return false;
+    // Drain only the *idle* time: what elapsed past the interval we had already decided to
+    // wait, not the wait itself. Time spent waiting on purpose is the price of the fight,
+    // and crediting it back is what would make this oscillate - unwind the whole escalation
+    // during every long wait, then climb it again over the next few seconds, forever.
+    if (state.nextAttemptMs != 0 && now > state.nextAttemptMs) {
+        state.pressure -= static_cast<double>(now - state.nextAttemptMs) * drainPerMs;
     }
 
-    // Drain what the elapsed time has earned back, then charge for this reapply. Under the
-    // allowance nothing is throttled at all, which is what keeps an ordinary burst - or an
-    // NPC who gets stripped once and redressed once - free.
-    if (state.lastReapplyMs != 0) {
-        state.burst -= static_cast<double>(now - state.lastReapplyMs) * drainPerMs;
-        if (state.burst < 0.0) state.burst = 0.0;
-    }
-    state.lastReapplyMs = now;
-    state.burst += 1.0;
+    // An attempt that found the actor already correct is the signal the throttle keeps
+    // probing for: whatever was undressing them has either stopped or put them back itself.
+    // Worth a whole step rather than waiting on the drain, so we speed up as sharply as we
+    // slowed down once the fight is over.
+    state.pressure += diverged ? 1.0 : -1.0;
+    if (state.pressure < 0.0) state.pressure = 0.0;
+    state.lastAttemptWasted = !diverged;
 
-    if (state.burst <= allowance) {
-        state.reported = false;
-        return true;
-    }
+    const std::int64_t intervalMs = ReapplyIntervalMs(state.pressure);
+    state.nextAttemptMs = now + intervalMs;
 
-    state.backoffUntilMs = now + backoffMs;
-    state.burst = 0.0;
-    if (!state.reported) {
-        state.reported = true;
-        spdlog::error("OutfitLockManager - OUTFIT TUG-OF-WAR: '{}' (0x{:08X}) has been redressed "
-                      "{} times faster than one per {}s. Something else is changing this NPC's "
-                      "outfit as fast as we put it back, so we are standing down for {}s rather "
-                      "than trading equips with it - each exchange also runs XPMSE/DD/OBody "
-                      "Papyrus for both mods. Unlock this NPC, or turn off "
-                      "bReapplyOnExternalChange, if it keeps happening.",
-            actorName ? actorName : "unknown", actorID, settings->GetReapplyBurstAllowance(),
-            settings->GetReapplySustainedIntervalSec(), settings->GetReapplyBackoffSec());
+    if (intervalMs > baseMs && intervalMs > state.reportedIntervalMs) {
+        state.reportedIntervalMs = intervalMs;
+        spdlog::warn("OutfitLockManager - OUTFIT TUG-OF-WAR: '{}' (0x{:08X}) keeps being undressed "
+                     "as fast as we redress them. Slowing to one reapply per {}ms rather than "
+                     "trading equips with whatever is doing it - each exchange also runs "
+                     "XPMSE/DD/OBody Papyrus for both mods, which is what drives the VM into a "
+                     "stack-dump freeze. We keep trying at that rate and speed back up on our "
+                     "own once they stay dressed. Unlock this NPC, or turn off "
+                     "bReapplyOnExternalChange, if it keeps happening.",
+            actorName ? actorName : "unknown", actorID, intervalMs);
+    } else if (intervalMs <= baseMs && state.reportedIntervalMs != 0) {
+        state.reportedIntervalMs = 0;
+        spdlog::info("OutfitLockManager - '{}' (0x{:08X}) is holding their locked outfit again; "
+                     "back to reapplying at the normal {}ms delay.",
+            actorName ? actorName : "unknown", actorID, baseMs);
     }
-    return false;
 }
 
 RE::BSEventNotifyControl OutfitLockManager::ProcessEvent(
@@ -654,12 +649,6 @@ void OutfitLockManager::EquipArmorList(RE::Actor* actor, const std::vector<RE::T
 {
     if (!actor) return;
 
-    auto* equipManager = RE::ActorEquipManager::GetSingleton();
-    if (!equipManager) {
-        spdlog::error("OutfitLockManager::EquipArmorList - No ActorEquipManager");
-        return;
-    }
-
     for (auto* armor : items) {
         if (!armor) continue;
 
@@ -676,16 +665,13 @@ void OutfitLockManager::EquipArmorList(RE::Actor* actor, const std::vector<RE::T
         });
 
         if (!inventory.empty()) {
-            // Devices go on through DD, which puts the rendered half on and starts the
-            // effects. Equipping the inventory half directly fires DD's OnEquipped anyway,
-            // but with none of the state it expects, so it re-runs the whole lock sequence
-            // to repair itself - once per reapply, i.e. once per cell change.
-            if (DeviceCompat::IsInventoryDevice(armor)) {
-                DeviceCompat::Equip(actor, armor);
-                continue;
-            }
-
-            equipManager->EquipObject(actor, armor, nullptr, 1, nullptr, true, false, false);
+            // Through the helper, which sends devices through DD (equipping the inventory
+            // half directly fires DD's OnEquipped with none of the state it expects, and
+            // DD re-runs the whole lock sequence to repair itself) and records the equip
+            // as pending. The engine queues it, and without the note a snapshot taken in
+            // the frame or two before it lands - the wheel's plates, an undo entry - reads
+            // the actor as still undressed.
+            ItemEquipHelper::EquipArmor(actor, armor);
             spdlog::trace("OutfitLockManager::EquipArmorList - Equipped '{}'", armor->GetFullName());
         } else {
             spdlog::warn("OutfitLockManager::EquipArmorList - Actor doesn't have '{}' in inventory",
@@ -814,17 +800,18 @@ void OutfitLockManager::ReconcileBeforeUserEdit(RE::Actor* actor)
         }
     }
 
-    // The breaker exists so we do not trade equips with whatever is cycling this actor.
+    // The throttle exists so we do not trade equips with whatever is cycling this actor.
     // The player opening the wheel on them is the one signal that outranks it: they are
     // about to edit this outfit, and editing it from a state some other mod chose is how
     // the wrong gear ends up in the lock for good.
-    const bool clearedBackoff = ClearEquipBackoff(actorID);
+    const bool wasThrottled = ResetReapplyThrottle(actorID);
 
     spdlog::info("OutfitLockManager::ReconcileBeforeUserEdit - '{}' (0x{:08X}) is not wearing "
         "their locked outfit{}; putting it back before the edit",
         actor->GetName(), actorID,
-        clearedBackoff ? ", and was in a stand-down the player opening the wheel overrides"
-                       : "");
+        wasThrottled ? ", and was on a slowed reapply schedule the player opening the wheel "
+                       "overrides"
+                     : "");
 
     // Same bracket every other reapply path uses - the unequip half would otherwise trip
     // SeverActions' alias debounce and have it re-dress the NPC on top of us.
@@ -1179,6 +1166,9 @@ bool OutfitLockManager::Lock(RE::Actor* actor)
     spdlog::info("OutfitLockManager::Lock - Locking actor '{}' (0x{:08X})",
         actor->GetName(), actor->GetFormID());
 
+    // An API caller locking an actor nobody has edited yet: what they wear is their own.
+    RememberDefaultIfUnlocked(actor);
+
     if (!SaveOutfit(actor, "locked")) {
         return false;
     }
@@ -1196,6 +1186,9 @@ bool OutfitLockManager::AdoptStoredOutfit(RE::Actor* actor, const std::string& s
     if (!actor || actor->IsPlayerRef()) {
         return false;
     }
+
+    // Before the copy below makes them locked, while what they have on is still theirs.
+    RememberDefaultIfUnlocked(actor);
 
     // Copied under the lock, applied outside it: ApplyOutfit takes m_mutex itself, and it
     // is not recursive. The copy has to land *before* the suspension below is constructed,
@@ -1241,6 +1234,18 @@ bool OutfitLockManager::Unlock(RE::Actor* actor)
 
     spdlog::info("OutfitLockManager::Unlock - Unlocking actor '{}' (0x{:08X})",
         actor->GetName(), actor->GetFormID());
+
+    // Their own clothes first. Restoring the outfit record below is what asks the engine
+    // to re-dress them, and the engine only obliges for some actors - and asynchronously,
+    // through Papyrus, for those. Putting the kept default on here means every unlocked
+    // NPC comes out dressed as they were, now; where the engine does follow up, it lands
+    // on the same look. Pieces a SetOutfit stripped out of the inventory are re-created
+    // first, or ApplyOutfit would prune them out of the very outfit it is applying.
+    if (HasOutfit(actor, "default")) {
+        EnsureOutfitItemsInInventory(actor, "default");
+        ApplyOutfit(actor, "default", true);
+        DeleteOutfit(actor, "default");
+    }
 
     // Give the NPC back to whoever had them: restoring the original outfit is what lets
     // SPID resume distributing to this actor. Restore first, then release - the other way
@@ -1473,6 +1478,16 @@ void OutfitLockManager::ReleaseGalleryItems(RE::Actor* actor)
     spdlog::info("OutfitLockManager::ReleaseGalleryItems - {} gallery item(s) on '{}' are theirs "
         "to keep now; nothing will be destroyed if they come off later",
         released, actor ? actor->GetName() : "every actor");
+}
+
+void OutfitLockManager::RememberDefaultIfUnlocked(RE::Actor* actor)
+{
+    if (!actor || actor->IsPlayerRef()) return;
+    if (IsLocked(actor) || HasOutfit(actor, "default")) return;
+
+    spdlog::info("OutfitLockManager::RememberDefaultIfUnlocked - Keeping what '{}' wears as their default",
+        actor->GetName());
+    SaveOutfit(actor, "default");
 }
 
 bool OutfitLockManager::HasDefaultOutfit(RE::Actor* actor) const
@@ -1820,12 +1835,8 @@ void OutfitLockManager::OnRevert(SKSE::SerializationInterface*)
     mgr->m_hasGalleryItems.store(false, std::memory_order_relaxed);
     mgr->RefreshLockedCount();
 
-    // Rate and debounce state is keyed on runtime ref IDs, which mean nothing across a
-    // revert. Left in place they would suppress a reapply for whoever inherits the ID.
-    {
-        std::lock_guard<std::mutex> rateLock(mgr->m_equipRateMutex);
-        mgr->m_equipRate.clear();
-    }
+    // Throttle and debounce state is keyed on runtime ref IDs, which mean nothing across a
+    // revert. Left in place they would slow down a reapply for whoever inherits the ID.
     {
         std::lock_guard<std::mutex> applyLock(mgr->m_lastApplyMutex);
         mgr->m_lastApplyMs.clear();
@@ -1924,10 +1935,19 @@ void OutfitLockManager::ApplyLockedOutfitsInLocation(RE::BGSLocation* location)
             }
         }
 
-        // Someone else is already cycling this actor's equipment. Adding our own
-        // unequip/equip traffic on top only feeds the Papyrus stack pile-up.
-        if (IsInEquipBackoff(actorID)) {
-            spdlog::warn("  - '{}' is in equip-storm backoff, not reapplying", actor->GetName());
+        // Someone else is cycling this actor's equipment and the throttle has already
+        // slowed us down over it. A door transition does not buy a free reapply past that -
+        // adding our own unequip/equip traffic on top is what feeds the Papyrus stack
+        // pile-up - but it does not get dropped either: hand it to the throttle, which
+        // makes the attempt once the current wait is up.
+        bool throttled = false;
+        {
+            std::lock_guard<std::mutex> lock(m_reapplyMutex);
+            const auto it = m_reapply.find(actorID);
+            throttled = it != m_reapply.end() && now < it->second.nextAttemptMs;
+        }
+        if (throttled) {
+            ScheduleReapply(actorID, actor->GetName(), "changed location while we were slowed down");
             continue;
         }
 
