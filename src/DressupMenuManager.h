@@ -16,6 +16,7 @@
 #include "dressup/Backdrop.h"
 #include "dressup/GalleryStateManager.h"
 #include "dressup/KeywordCategoryManager.h"
+#include "dressup/MenuScrollMemory.h"
 #include "dressup/ItemEquipHelper.h"
 #include "dressup/PapyrusBridge.h"
 #include "openvr.h"
@@ -325,6 +326,7 @@ public:
         // spiral is refilled, so the vector has to be emptied here rather than left to
         // RefreshItemSpiral - see the note there.
         m_itemElements.clear();
+        RememberSpiralScroll();  // before Clear - the position is read off the live wheel
         if (m_itemSpiral) {
             m_itemSpiral->Clear();
         }
@@ -630,10 +632,105 @@ private:
             m_outfitRowVisible, static_cast<int>(m_galleryMode));
     }
 
+    // === Scroll memory ===
+    //
+    // Each of the three scrolling containers is one container showing many views, and every
+    // switch between views empties and refills it. Left alone the position goes with the
+    // contents, so a player who scrolled a long way into a mod category and then glanced at
+    // another one came back to the top of the first. Each container therefore remembers the
+    // key of the view it is currently showing, hands its position to MenuScrollMemory under
+    // that key just before it is emptied, and takes the new view's position back once it has
+    // been refilled.
+    //
+    // The key is stored rather than derived on demand because the remember happens after the
+    // state naming the new view has already been set: OnCategorySelected assigns the category
+    // and then rebuilds, so by the time the wheel is emptied there is nothing left to say
+    // what was in it.
+
+    // The actor being dressed, as part of a key. The categories are cached once for the whole
+    // game but narrowed to whoever is being dressed, so the same category is a different list
+    // - and a different position - per actor.
+    std::string ScrollActorKey() const
+    {
+        RE::Actor* target = GetCurrentTargetActor();
+        return target ? fmt::format("{:08X}", target->GetFormID()) : std::string("none");
+    }
+
+    // Which view the wheel is showing: a gallery category, or one of the two inventories.
+    std::string SpiralScrollKey() const
+    {
+        const std::string actor = ScrollActorKey();
+
+        if (!m_activeModCategory.empty()) return actor + "|mods:" + m_activeModCategory;
+        if (!m_activeKeywordCategory.empty()) return actor + "|kw:" + m_activeKeywordCategory;
+
+        return actor + (InventoryManager::GetSingleton()->IsTargetPlayer() ? "|inv:player" : "|inv:npc");
+    }
+
+    std::string GalleryScrollKey() const
+    {
+        return ScrollActorKey() +
+            (m_galleryMode == GalleryMode::Mods ? "|gallery:mods" : "|gallery:keywords");
+    }
+
+    std::string OutfitScrollKey() const { return ScrollActorKey() + "|outfits"; }
+
+    // Hand a container's position to the memory under the view it is showing, and forget the
+    // view. Must run while the container still holds that view's contents: the position is
+    // normalized against them, and an emptied container reports 0.
+    void RememberSpiralScroll()
+    {
+        if (!m_itemSpiral || m_spiralViewKey.empty()) return;
+        MenuScrollMemory::GetSingleton()->Remember(m_spiralViewKey, m_itemSpiral->GetScrollPosition());
+        m_spiralViewKey.clear();
+    }
+
+    void RememberGalleryScroll()
+    {
+        if (!m_galleryRow || m_galleryViewKey.empty()) return;
+        MenuScrollMemory::GetSingleton()->Remember(m_galleryViewKey, m_galleryRow->GetScrollPosition());
+        m_galleryViewKey.clear();
+    }
+
+    void RememberOutfitScroll()
+    {
+        if (!m_outfitRow || m_outfitViewKey.empty()) return;
+        MenuScrollMemory::GetSingleton()->Remember(m_outfitViewKey, m_outfitRow->GetScrollPosition());
+        m_outfitViewKey.clear();
+    }
+
+    // Adopt a view and put the container back where that view was left. Must run after the
+    // container has been refilled, for the same reason: the range the position is scaled
+    // against comes from the contents. A view never seen before recalls 0 - the top of the
+    // list, which is where these containers always used to start.
+    void RestoreSpiralScroll()
+    {
+        if (!m_itemSpiral) return;
+        m_spiralViewKey = SpiralScrollKey();
+        m_itemSpiral->SetScrollPosition(MenuScrollMemory::GetSingleton()->Recall(m_spiralViewKey));
+    }
+
+    void RestoreGalleryScroll()
+    {
+        if (!m_galleryRow) return;
+        m_galleryViewKey = GalleryScrollKey();
+        m_galleryRow->SetScrollPosition(MenuScrollMemory::GetSingleton()->Recall(m_galleryViewKey));
+    }
+
+    void RestoreOutfitScroll()
+    {
+        if (!m_outfitRow) return;
+        m_outfitViewKey = OutfitScrollKey();
+        m_outfitRow->SetScrollPosition(MenuScrollMemory::GetSingleton()->Recall(m_outfitViewKey));
+    }
+
     // Refresh item spiral based on current inventory source, filter mode, or active mod category
     void RefreshItemSpiral()
     {
         if (!m_itemSpiral || !m_api) return;
+
+        // Where the view being replaced was scrolled to, while it is still there to ask.
+        RememberSpiralScroll();
 
         // Forget the pointers before the container destroys what they point at. Clear()
         // tombstones every child, so between the two calls the vector names dead elements -
@@ -658,6 +755,7 @@ private:
         // If a gallery category is selected, show its items instead of the inventory
         if (IsShowingGalleryItems()) {
             RefreshItemSpiralWithGalleryArmor();
+            RestoreSpiralScroll();
             return;
         }
 
@@ -701,6 +799,8 @@ private:
                 m_itemSpiral->AddChild(item);
             }
         }
+
+        RestoreSpiralScroll();
 
         spdlog::debug("DressupMenuManager::RefreshItemSpiral - Refreshed with {} items + anchor handle", m_currentItemList.size());
     }
@@ -904,6 +1004,7 @@ private:
         } else {
             m_editingSlot.reset();
 
+            RememberOutfitScroll();  // before Clear - the position is read off the live row
             ForgetOutfitRowElements();
             if (m_outfitRow) {
                 m_outfitRow->Clear();
@@ -939,6 +1040,7 @@ private:
         // spawns at the container's centre and flies out to its slot; created into a hidden
         // one it skips the spawn and is simply there when the row appears.
         m_outfitRow->SetVisible(false);
+        RememberOutfitScroll();     // before Clear - the position is read off the live row
         ForgetOutfitRowElements();  // before Clear - see RefreshItemSpiral
         m_outfitRow->Clear();
 
@@ -1041,7 +1143,7 @@ private:
         }
 
         RefreshOutfitHighlight();
-        m_outfitRow->ResetScroll();
+        RestoreOutfitScroll();
         m_outfitRow->SetVisible(true);
 
         spdlog::debug("DressupMenuManager::RefreshOutfitRow - {} saved outfit(s), {} on",
@@ -1485,6 +1587,11 @@ private:
         spdlog::info("DressupMenuManager::SetGalleryMode - {} -> {}",
             static_cast<int>(m_galleryMode), static_cast<int>(mode));
 
+        // Closing a gallery empties the row below without going through RefreshGalleryRow,
+        // so the outgoing gallery's position has to be taken here while the row still holds
+        // it. The wheel needs no such help: RefreshItemSpiral remembers its own.
+        RememberGalleryScroll();
+
         m_galleryMode = mode;
 
         // Leaving a category always returns the spiral to the inventory view
@@ -1593,6 +1700,7 @@ private:
         // Bail out if menu is closed - UI elements may be invalid
         if (!IsMenuOpen() || !m_galleryRow || !m_api || m_galleryMode == GalleryMode::None) return;
 
+        RememberGalleryScroll();     // before Clear - the position is read off the live row
         m_categoryElements.clear();  // before Clear - see RefreshItemSpiral
         m_galleryRow->Clear();
 
@@ -1627,8 +1735,8 @@ private:
             PopulateKeywordCategories();
         }
 
-        // Reset scroll position to show the first entries
-        m_galleryRow->ResetScroll();
+        // Back to wherever this gallery was left, or the first entries the first time
+        RestoreGalleryScroll();
     }
 
     // Which entry of the gallery row the spiral is currently showing, or -1 for none.
@@ -1881,6 +1989,12 @@ public:
             return;
         }
 
+        // Keep where each container was left, so opening the menu on this actor again
+        // comes back to it. Read off the live containers, before the teardown below.
+        RememberSpiralScroll();
+        RememberGalleryScroll();
+        RememberOutfitScroll();
+
         // End any active grab/positioning
         m_root->EndPositioning();
 
@@ -2095,10 +2209,17 @@ private:
 
     P3DUI::Interface001* m_api = nullptr;
     P3DUI::Root* m_root = nullptr;
-    P3DUI::Container* m_itemSpiral = nullptr;
+    P3DUI::ScrollWheel* m_itemSpiral = nullptr;
     P3DUI::ScrollableContainer* m_handleRow = nullptr;   // ColumnGrid for handle buttons (single row)
     P3DUI::ScrollableContainer* m_galleryRow = nullptr;  // ColumnGrid for mod categories (horizontal scroll)
     P3DUI::ScrollableContainer* m_outfitRow = nullptr;   // ColumnGrid of saved outfits (horizontal scroll)
+
+    // The view each scrolling container is currently showing, as a MenuScrollMemory key.
+    // Empty means the container holds nothing worth remembering. See RememberSpiralScroll.
+    std::string m_spiralViewKey;
+    std::string m_galleryViewKey;
+    std::string m_outfitViewKey;
+
     P3DUI::Text* m_infoText = nullptr;         // Context-dependent info text
     P3DUI::Text* m_editingText = nullptr;      // "Editing Outfit N", between wheel and tool row
 

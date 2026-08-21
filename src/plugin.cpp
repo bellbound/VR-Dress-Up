@@ -12,6 +12,7 @@
 #include "dressup/UndressManager.h"
 #include "dressup/WeaponLockManager.h"
 #include "dressup/GalleryStateManager.h"
+#include "dressup/MenuScrollMemory.h"
 #include "dressup/ArmorModManager.h"
 #include "InventoryManager.h"
 
@@ -40,6 +41,7 @@ namespace SerializationCallbacks
         SeverActionsCompat::OnPreLoad();
         UndressManager::OnPreLoad();
         GalleryStateManager::OnPreLoad();
+        MenuScrollMemory::OnPreLoad();
         WeaponLockManager::OnPreLoad();
 
         // Central dispatch loop — each record goes to the correct manager
@@ -85,6 +87,7 @@ namespace SerializationCallbacks
         SeverActionsCompat::OnRevert(a_intfc);
         UndressManager::OnRevert(a_intfc);
         GalleryStateManager::OnRevert(a_intfc);
+        MenuScrollMemory::OnRevert(a_intfc);
         WeaponLockManager::OnRevert(a_intfc);
     }
 }

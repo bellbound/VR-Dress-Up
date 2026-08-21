@@ -53,6 +53,7 @@ struct Positionable;
 struct Element;
 struct Text;
 struct Container;
+struct ScrollWheel;
 struct ScrollableContainer;
 struct Root;
 struct Interface001;
@@ -494,6 +495,44 @@ struct Container : Positionable {
 };
 
 // =============================================================================
+// ScrollWheel - Half-wheel container with scroll position control
+// =============================================================================
+// What CreateScrollWheel returns. The wheel scrolls by rotation rather than by
+// translation, so it shares the grids' normalized scroll accessors but none of
+// their fill-direction or origin controls - hence its own type rather than
+// ScrollableContainer.
+//
+// Child 0 is the anchor handle: it sits at the centre and is never scrolled away,
+// so a scroll position of 0.0 still shows it along with the first ring of items.
+
+struct ScrollWheel : Container {
+    // === Scroll Position ===
+    // Get current scroll position as normalized value (0.0 = start, 1.0 = end).
+    // Returns 0.0 when the wheel holds too few items to scroll.
+    virtual float GetScrollPosition() = 0;
+
+    // Set scroll position as normalized value (0.0 = start, 1.0 = end).
+    // Values are clamped to valid range [0.0, 1.0]. Because the range is derived
+    // from the current children, set this after the wheel has been filled.
+    virtual void SetScrollPosition(float position) = 0;
+
+    // Reset scroll to the start position (equivalent to SetScrollPosition(0.0f))
+    virtual void ResetScroll() = 0;
+
+    // === Reserved for future expansion ===
+    virtual void _scrollwheel_reserved1() {}
+    virtual void _scrollwheel_reserved2() {}
+    virtual void _scrollwheel_reserved3() {}
+    virtual void _scrollwheel_reserved4() {}
+    virtual void _scrollwheel_reserved5() {}
+    virtual void _scrollwheel_reserved6() {}
+    virtual void _scrollwheel_reserved7() {}
+    virtual void _scrollwheel_reserved8() {}
+    virtual void _scrollwheel_reserved9() {}
+    virtual void _scrollwheel_reserved10() {}
+};
+
+// =============================================================================
 // ScrollableContainer - Container with scroll position control
 // =============================================================================
 // Used for grid containers that support scrolling:
@@ -722,10 +761,17 @@ struct Root : Container {
 // 0.10.12.0 added Root::SetCurvature in the _root_reserved1 slot - additive, so a patch bump
 // on the same grounds as 0.10.1.0. A consumer that never calls it gets the flat menus it
 // always had; the curve is off unless a radius is set.
+//
+// 0.10.13.0 gave the half-wheel the scroll accessors the grids have had all along:
+// CreateScrollWheel now returns ScrollWheel* rather than Container*, where ScrollWheel is
+// Container plus Get/SetScrollPosition and ResetScroll. This is additive in the same sense
+// as 0.10.1.0 even though a signature moved: the returned pointer is unchanged, the object's
+// Container vtable prefix is unchanged, and a consumer built against any earlier header
+// still compiles and still dispatches correctly through the Container* it stores.
 constexpr uint32_t P3DUI_INTERFACE_VERSION =
     0 * 1000000 +
     10 * 10000 +
-    12 * 100 +
+    13 * 100 +
     0;
 
 struct Interface001 {
@@ -745,7 +791,7 @@ struct Interface001 {
     // Create nodes. Caller must add to a container via AddChild().
     virtual Element* CreateElement(const ElementConfig& config) = 0;
     virtual Text* CreateText(const TextConfig& config) = 0;
-    virtual Container* CreateScrollWheel(const ScrollWheelConfig& config) = 0;
+    virtual ScrollWheel* CreateScrollWheel(const ScrollWheelConfig& config) = 0;
     virtual Container* CreateWheel(const WheelConfig& config) = 0;
 
     // === Scrollable Grid Containers ===
